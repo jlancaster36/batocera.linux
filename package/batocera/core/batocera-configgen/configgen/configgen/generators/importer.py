@@ -35,6 +35,7 @@ _GENERATOR_MAP: Final[dict[str, tuple[str, str]]] = {
     'etlegacy': ('etlegacy.etlegacyGenerator', 'ETLegacyGenerator'),
     'fallout1-ce': ('fallout1.fallout1Generator', 'Fallout1Generator'),
     'fallout2-ce': ('fallout2.fallout2Generator', 'Fallout2Generator'),
+    'gba-dual': ('gba_dual.gbaDualGenerator', 'GbaDualGenerator'),
     'gsplus': ('gsplus.gsplusGenerator', 'GSplusGenerator'),
     'gzdoom': ('gzdoom.gzdoomGenerator', 'GZDoomGenerator'),
     'hypseus-singe': ('hypseus_singe.hypseusSingeGenerator', 'HypseusSingeGenerator'),

@@ -1,0 +1,16 @@
+#!/bin/sh
+
+set -eu
+
+ROM=${1:?ROM path is required}
+LAYOUT=${gba_dual_layout:-horizontal}
+LINK=${gba_dual_link:-true}
+
+set -- --rom1 "$ROM" --rom2 "$ROM" --layout "$LAYOUT"
+if [ "$LINK" = "true" ]; then
+    set -- "$@" --link
+else
+    set -- "$@" --no-link
+fi
+
+exec /usr/bin/gba-dual "$@"

@@ -1,0 +1,21 @@
+features:
+  - padtokeyboard
+shared_features:
+  - powermode
+  - tdp
+  - videomode
+custom_features:
+  gba_dual_layout:
+    prompt: SPLIT LAYOUT
+    description: Arrange the two GBA screens horizontally or vertically.
+    choices:
+      Horizontal (Default): "horizontal"
+      Vertical: "vertical"
+  gba_dual_link:
+    prompt: LINK CABLE
+    description: Enable the mGBA GBA multiplayer link backend.
+    choices:
+      Enabled (Default): "true"
+      Disabled: "false"
+systems:
+  - gba2players

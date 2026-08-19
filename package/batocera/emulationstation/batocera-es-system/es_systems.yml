@@ -265,6 +265,23 @@ gba:
   comment_br: |
     Para mais informações: https://wiki.batocera.org/systems:gba
 
+gba2players:
+  name:       Game Boy Advance (2 Players)
+  manufacturer: Nintendo
+  release: 2001
+  hardware: portable
+  extensions: [gba, zip]
+  group:      gba
+  emulators:
+    gba-dual:
+      gba-dual: { requireAnyOf: [BR2_PACKAGE_GBA_DUAL], incompatible_extensions: [zip] }
+  comment_en: |
+    Two synchronized mGBA instances rendered in one split-screen window.
+  comment_fr: |
+    Deux instances mGBA synchronisees dans une fenetre partagee.
+  comment_br: |
+    Duas instancias mGBA sincronizadas em uma janela dividida.
+
 gbc:
   name:       Game Boy Color
   manufacturer: Nintendo
