@@ -31,10 +31,13 @@ struct options {
 	const char* rom2;
 	enum layout layout;
 	bool link;
+	int frames;
+	const char* screenshot;
 };
 
 static void usage(const char* program) {
-	fprintf(stderr, "Usage: %s --rom1 ROM --rom2 ROM [--layout horizontal|vertical] [--link|--no-link]\n", program);
+	fprintf(stderr, "Usage: %s --rom1 ROM --rom2 ROM [--layout horizontal|vertical] [--link|--no-link] "
+	                "[--frames N --screenshot PATH]\n", program);
 }
 
 static bool parse_options(int argc, char** argv, struct options* options) {
@@ -56,11 +59,15 @@ static bool parse_options(int argc, char** argv, struct options* options) {
 			options->link = true;
 		} else if (!strcmp(argv[i], "--no-link")) {
 			options->link = false;
+		} else if (!strcmp(argv[i], "--frames") && i + 1 < argc) {
+			options->frames = atoi(argv[++i]);
+		} else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) {
+			options->screenshot = argv[++i];
 		} else {
 			return false;
 		}
 	}
-	return options->rom1 && options->rom2;
+	return options->rom1 && options->rom2 && options->frames >= 0;
 }
 
 static bool load_instance(struct instance* instance, const char* path) {
@@ -109,12 +116,12 @@ static uint32_t map_button(const SDL_ControllerButtonEvent* event) {
 	}
 }
 
-static void render(struct instance* first, struct instance* second, enum layout layout, SDL_Renderer* renderer, SDL_Texture* texture) {
+static uint32_t* compose(struct instance* first, struct instance* second, enum layout layout, int* outWidth, int* outHeight) {
 	const int width = layout == LAYOUT_HORIZONTAL ? GBA_WIDTH * 2 : GBA_WIDTH;
 	const int height = layout == LAYOUT_HORIZONTAL ? GBA_HEIGHT : GBA_HEIGHT * 2;
 	uint32_t* composite = malloc((size_t) width * (size_t) height * sizeof(*composite));
 	if (!composite) {
-		return;
+		return NULL;
 	}
 	for (int y = 0; y < GBA_HEIGHT; ++y) {
 		for (int x = 0; x < GBA_WIDTH; ++x) {
@@ -129,11 +136,77 @@ static void render(struct instance* first, struct instance* second, enum layout 
 			}
 		}
 	}
+	*outWidth = width;
+	*outHeight = height;
+	return composite;
+}
+
+static void render(struct instance* first, struct instance* second, enum layout layout, SDL_Renderer* renderer, SDL_Texture* texture) {
+	int width, height;
+	uint32_t* composite = compose(first, second, layout, &width, &height);
+	if (!composite) {
+		return;
+	}
 	SDL_UpdateTexture(texture, NULL, composite, width * (int) sizeof(*composite));
 	SDL_RenderClear(renderer);
 	SDL_RenderCopy(renderer, texture, NULL, NULL);
 	SDL_RenderPresent(renderer);
 	free(composite);
+}
+
+// Counts pixels differing from the top-left one, as a cheap "isn't just a stuck blank frame" signal.
+static int count_nonuniform_pixels(const uint32_t* composite, int width, int height) {
+	const uint32_t first = composite[0];
+	int distinct = 0;
+	for (int i = 0; i < width * height; ++i) {
+		if (composite[i] != first) {
+			++distinct;
+		}
+	}
+	return distinct;
+}
+
+static bool save_screenshot(const uint32_t* composite, int width, int height, const char* path) {
+	SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormatFrom((void*) composite, width, height, 32, width * 4, SDL_PIXELFORMAT_ABGR8888);
+	if (!surface) {
+		fprintf(stderr, "gba-dual: failed to wrap framebuffer: %s\n", SDL_GetError());
+		return false;
+	}
+	const bool ok = SDL_SaveBMP(surface, path) == 0;
+	if (!ok) {
+		fprintf(stderr, "gba-dual: failed to save screenshot: %s\n", SDL_GetError());
+	}
+	SDL_FreeSurface(surface);
+	return ok;
+}
+
+// Headless: run a fixed number of frames with no window/display and optionally dump a screenshot.
+// This is what lets the ROM smoke test run inside Docker without an X server.
+static int run_headless(struct instance* instances, const struct options* options) {
+	if (SDL_Init(0) < 0) {
+		fprintf(stderr, "gba-dual: SDL init failed: %s\n", SDL_GetError());
+		return EXIT_FAILURE;
+	}
+	for (int i = 0; i < options->frames; ++i) {
+		instances[0].core->setKeys(instances[0].core, 0);
+		instances[1].core->setKeys(instances[1].core, 0);
+		instances[0].core->runFrame(instances[0].core);
+		instances[1].core->runFrame(instances[1].core);
+	}
+	int width = 0, height = 0;
+	uint32_t* composite = compose(&instances[0], &instances[1], options->layout, &width, &height);
+	int exitCode = EXIT_FAILURE;
+	if (composite) {
+		const int distinct = count_nonuniform_pixels(composite, width, height);
+		printf("gba-dual: ran %d frames, %d/%d pixels differ from the top-left pixel\n", options->frames, distinct, width * height);
+		exitCode = EXIT_SUCCESS;
+		if (options->screenshot && !save_screenshot(composite, width, height, options->screenshot)) {
+			exitCode = EXIT_FAILURE;
+		}
+		free(composite);
+	}
+	SDL_Quit();
+	return exitCode;
 }
 
 int main(int argc, char** argv) {
@@ -148,6 +221,12 @@ int main(int argc, char** argv) {
 		destroy_instance(&instances[0]);
 		destroy_instance(&instances[1]);
 		return EXIT_FAILURE;
+	}
+	if (options.frames > 0) {
+		const int exitCode = run_headless(instances, &options);
+		destroy_instance(&instances[0]);
+		destroy_instance(&instances[1]);
+		return exitCode;
 	}
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO) < 0) {
 		fprintf(stderr, "gba-dual: SDL init failed: %s\n", SDL_GetError());

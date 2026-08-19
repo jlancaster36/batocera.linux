@@ -5,6 +5,11 @@
 # since the full Batocera Buildroot toolchain is too slow for edit/compile loops.
 FROM debian:bookworm-slim
 
+# mCoreLoadConfig() reads $HOME/.config unconditionally; a bare `docker run`
+# with an exec-form entrypoint has no HOME set, which segfaults mGBA's config
+# loader (unchecked getenv("HOME") -> snprintf("%s/.config", NULL)).
+ENV HOME=/root
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake ninja-build pkg-config git ca-certificates \
     libsdl2-dev libpng-dev libzip-dev zlib1g-dev \

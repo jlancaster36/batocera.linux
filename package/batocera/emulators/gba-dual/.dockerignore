@@ -1,0 +1,4 @@
+test/out/
+test/build/
+build/
+.git/

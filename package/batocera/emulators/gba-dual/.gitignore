@@ -1,2 +1,6 @@
 /build/
 /test/build/
+/test/out/
+*.gba
+*.gbc
+*.zip
