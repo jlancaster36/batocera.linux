@@ -9,8 +9,9 @@
 # Usage: pwsh package/batocera/emulators/gba-dual/test/run-audio-smoke.ps1 -Rom "C:\path\to\game.gba"
 param(
     [Parameter(Mandatory = $true)][string]$Rom,
-    [int]$Seconds = 8,
-    [double]$MinNonZeroFraction = 0.05
+    [int]$Seconds = 12,
+    [double]$MinNonZeroFraction = 0.05,
+    [int]$SampleRate = 44100
 )
 $ErrorActionPreference = "Stop"
 
@@ -31,7 +32,9 @@ $captureFile = Join-Path $outDir "audio-smoke.raw"
 Remove-Item -ErrorAction SilentlyContinue $captureFile
 
 $containerName = "gba-dual-audio-smoke"
-docker rm -f $containerName 2>$null | Out-Null
+if (docker ps -aq --filter "name=^${containerName}$") {
+    docker rm -f $containerName | Out-Null
+}
 docker run -d --name $containerName `
     -e SDL_AUDIODRIVER=disk -e SDL_DISKAUDIOFILE=/out/audio-smoke.raw `
     -v "${romFull}:/rom.gba:ro" -v "${outDir}:/out" `
@@ -67,6 +70,35 @@ for ($i = 0; $i -lt $sampleCount; $i++) {
 $fraction = $nonZero / $sampleCount
 
 Write-Host ("Captured {0} samples, {1:P2} non-zero, range [{2}, {3}]" -f $sampleCount, $fraction, $min, $max)
+
+# Also write a standard .wav so the capture can actually be listened to -
+# raw PCM alone won't play in a normal media player.
+$wavFile = Join-Path $outDir "audio-smoke.wav"
+$dataSize = $bytes.Length
+$channels = 2
+$bitsPerSample = 16
+$byteRate = $SampleRate * $channels * ($bitsPerSample / 8)
+$blockAlign = $channels * ($bitsPerSample / 8)
+$stream = [System.IO.File]::Create($wavFile)
+$writer = New-Object System.IO.BinaryWriter($stream)
+$writer.Write([byte[]][char[]]"RIFF")
+$writer.Write([int32](36 + $dataSize))
+$writer.Write([byte[]][char[]]"WAVE")
+$writer.Write([byte[]][char[]]"fmt ")
+$writer.Write([int32]16)
+$writer.Write([int16]1)
+$writer.Write([int16]$channels)
+$writer.Write([int32]$SampleRate)
+$writer.Write([int32]$byteRate)
+$writer.Write([int16]$blockAlign)
+$writer.Write([int16]$bitsPerSample)
+$writer.Write([byte[]][char[]]"data")
+$writer.Write([int32]$dataSize)
+$writer.Write($bytes)
+$writer.Dispose()
+$stream.Dispose()
+Write-Host "Playable file: $wavFile"
+
 if ($fraction -lt $MinNonZeroFraction) {
     throw ("FAIL: only {0:P2} of samples were non-zero (threshold {1:P0}) - audio is effectively silent" -f $fraction, $MinNonZeroFraction)
 }
