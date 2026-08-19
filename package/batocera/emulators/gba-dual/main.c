@@ -14,11 +14,12 @@
 #include <mgba/internal/gba/sio/lockstep.h>
 #include <mgba-util/image.h>
 #include <mgba-util/audio-buffer.h>
+#include <mgba-util/audio-resampler.h>
 #include <mgba-util/vfs.h>
 
 #define GBA_WIDTH 240
 #define GBA_HEIGHT 160
-#define AUDIO_FRAMES 4096
+#define AUDIO_MIX_FRAMES 2048
 
 enum layout {
 	LAYOUT_HORIZONTAL,
@@ -60,6 +61,94 @@ static void discard_log(struct mLogger* logger, int category, enum mLogLevel lev
 }
 
 static struct mLogger nullLogger = { .log = discard_log };
+
+// One resampler per instance, each resampling that core's native-rate audio
+// into a per-instance buffer at the shared SDL device rate; the callback then
+// sums both into the output. Works for both the threaded (--link) and plain
+// synchronous (--no-link) cores: instance->thread.impl is NULL in the latter
+// case, and every mCoreSync* call here is a no-op when passed a NULL sync.
+struct audio_source {
+	struct mAudioBuffer buffer;
+	struct mAudioResampler resampler;
+};
+
+struct audio_mixer {
+	struct instance* instances;
+	struct audio_source sources[2];
+	SDL_AudioDeviceID device;
+	int sampleRate;
+};
+
+static void audio_callback(void* userdata, Uint8* stream, int len) {
+	struct audio_mixer* mixer = userdata;
+	memset(stream, 0, len);
+	const int frames = len / (int) (2 * sizeof(int16_t));
+	if (frames <= 0 || frames > AUDIO_MIX_FRAMES) {
+		return;
+	}
+	int16_t* out = (int16_t*) stream;
+	for (int i = 0; i < 2; ++i) {
+		struct instance* instance = &mixer->instances[i];
+		struct audio_source* source = &mixer->sources[i];
+		struct mCoreSync* sync = instance->thread.impl ? &instance->thread.impl->sync : NULL;
+		struct mAudioBuffer* raw = instance->core->getAudioBuffer(instance->core);
+		const unsigned sampleRate = instance->core->audioSampleRate(instance->core);
+		// Fully paired per source (lock -> resample -> consume) before moving to
+		// the next one - never hold one instance's audio lock while touching the
+		// other's, for the same reason render_linked() cannot nest video locks.
+		mCoreSyncLockAudio(sync);
+		if (sync) {
+			sync->audioHighWater = frames * 4;
+		}
+		mAudioResamplerSetSource(&source->resampler, raw, sampleRate, true);
+		mAudioResamplerProcess(&source->resampler);
+		mCoreSyncConsumeAudio(sync);
+
+		int16_t mixed[AUDIO_MIX_FRAMES * 2];
+		const int available = mAudioBufferRead(&source->buffer, mixed, frames);
+		for (int f = 0; f < available; ++f) {
+			for (int c = 0; c < 2; ++c) {
+				const int32_t sum = out[f * 2 + c] + mixed[f * 2 + c];
+				out[f * 2 + c] = (int16_t) (sum > INT16_MAX ? INT16_MAX : (sum < INT16_MIN ? INT16_MIN : sum));
+			}
+		}
+	}
+}
+
+static bool start_audio(struct audio_mixer* mixer, struct instance* instances) {
+	mixer->instances = instances;
+	SDL_AudioSpec desired = {0};
+	desired.freq = 44100;
+	desired.format = AUDIO_S16SYS;
+	desired.channels = 2;
+	desired.samples = AUDIO_MIX_FRAMES;
+	desired.callback = audio_callback;
+	desired.userdata = mixer;
+	SDL_AudioSpec obtained;
+	mixer->device = SDL_OpenAudioDevice(NULL, 0, &desired, &obtained, 0);
+	if (mixer->device == 0) {
+		fprintf(stderr, "gba-dual: failed to open audio device: %s\n", SDL_GetError());
+		return false;
+	}
+	mixer->sampleRate = obtained.freq;
+	for (int i = 0; i < 2; ++i) {
+		mAudioBufferInit(&mixer->sources[i].buffer, AUDIO_MIX_FRAMES * 4, 2);
+		mAudioResamplerInit(&mixer->sources[i].resampler, mINTERPOLATOR_SINC);
+		mAudioResamplerSetDestination(&mixer->sources[i].resampler, &mixer->sources[i].buffer, mixer->sampleRate);
+	}
+	SDL_PauseAudioDevice(mixer->device, 0);
+	return true;
+}
+
+static void stop_audio(struct audio_mixer* mixer) {
+	if (mixer->device) {
+		SDL_CloseAudioDevice(mixer->device);
+	}
+	for (int i = 0; i < 2; ++i) {
+		mAudioBufferDeinit(&mixer->sources[i].buffer);
+		mAudioResamplerDeinit(&mixer->sources[i].resampler);
+	}
+}
 
 static bool parse_options(int argc, char** argv, struct options* options) {
 	options->layout = LAYOUT_HORIZONTAL;
@@ -108,6 +197,7 @@ static bool load_instance(struct instance* instance, const char* path) {
 		return false;
 	}
 	instance->core->setVideoBuffer(instance->core, instance->pixels, GBA_WIDTH);
+	instance->core->setAudioBufferSize(instance->core, AUDIO_MIX_FRAMES);
 	instance->core->reset(instance->core);
 	return true;
 }
@@ -269,8 +359,9 @@ static bool start_link_session(struct instance instances[2], struct GBASIOLockst
 	GBASIOLockstepCoordinatorInit(coordinator);
 	for (int i = 0; i < 2; ++i) {
 		// mCoreThreadStart() snapshots core->opts into the thread's sync object,
-		// so videoSync must be forced on before starting, not after.
+		// so videoSync/audioSync must be forced on before starting, not after.
 		instances[i].core->opts.videoSync = true;
+		instances[i].core->opts.audioSync = true;
 		instances[i].thread.core = instances[i].core;
 		// Each core thread installs its own per-thread logger that bypasses the
 		// process-wide default logger, so it must be silenced separately too.
@@ -404,6 +495,11 @@ int main(int argc, char** argv) {
 		destroy_instance(&instances[1]);
 		return EXIT_FAILURE;
 	}
+	struct audio_mixer mixer = {0};
+	const bool audioStarted = start_audio(&mixer, instances);
+	if (!audioStarted) {
+		fprintf(stderr, "gba-dual: continuing without audio\n");
+	}
 	bool running = true;
 	while (running) {
 		SDL_Event event;
@@ -437,6 +533,9 @@ int main(int argc, char** argv) {
 			instances[1].core->runFrame(instances[1].core);
 			render(&instances[0], &instances[1], options.layout, renderer, texture);
 		}
+	}
+	if (audioStarted) {
+		stop_audio(&mixer);
 	}
 	if (options.link) {
 		stop_link_session(instances, &coordinator);

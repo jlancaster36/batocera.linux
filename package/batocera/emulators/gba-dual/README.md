@@ -26,7 +26,9 @@ The Batocera integration launches it through `batocera-gba2p`, which reads the
   always load a full ROM, and is not implemented.
 - `--no-link` and the `--frames`/`--screenshot` headless test mode still use
   the simpler single-thread synchronous loop (no real link timing).
-- Audio mixing is not yet connected to the SDL audio callback.
+- Audio from both instances is mixed and sent to a single SDL audio device
+  (per-instance `mAudioResampler`, summed and clamped to 16-bit). Works for
+  both `--link` and `--no-link`.
 
 The package deliberately stages the official mGBA library and headers so the
 frontend uses the real `mCore` API rather than an invented wrapper API.
