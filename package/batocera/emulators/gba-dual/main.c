@@ -305,16 +305,33 @@ static void stop_link_session(struct instance instances[2], struct GBASIOLockste
 }
 
 // Blocks until both threaded cores have a completed frame ready, composites and
-// presents it, then releases both so they can render their next frame. Mirrors
-// mgba's own sw-sdl2.c runloop (WaitFrameStart/WaitFrameEnd), extended to two cores.
+// presents it, then releases both so they can render their next frame. Each
+// core's mutex must be released (mCoreSyncWaitFrameEnd) before touching the
+// other's - mCoreSyncWaitFrameStart holds its sync's mutex locked until then,
+// and that mutex is the same one the core thread needs to post its next frame
+// (mCoreSyncPostFrame). Holding core A's lock while blocking on core B stalls
+// core A's own thread for as long as core B takes, and vice versa next tick -
+// two cores serially starving each other's lock collapses throughput to a
+// handful of fps. Snapshot each core independently instead, reusing the last
+// snapshot for whichever core isn't ready yet so neither side ever blocks the
+// other.
 static void render_linked(struct instance instances[2], enum layout layout, SDL_Renderer* renderer, SDL_Texture* texture) {
-	const bool ready0 = mCoreSyncWaitFrameStart(&instances[0].thread.impl->sync);
-	const bool ready1 = mCoreSyncWaitFrameStart(&instances[1].thread.impl->sync);
-	if (ready0 && ready1) {
-		render(&instances[0], &instances[1], layout, renderer, texture);
+	static mColor snapshot0[GBA_WIDTH * GBA_HEIGHT];
+	static mColor snapshot1[GBA_WIDTH * GBA_HEIGHT];
+
+	if (mCoreSyncWaitFrameStart(&instances[0].thread.impl->sync)) {
+		memcpy(snapshot0, instances[0].pixels, sizeof(snapshot0));
+	}
+	mCoreSyncWaitFrameEnd(&instances[0].thread.impl->sync);
+
+	if (mCoreSyncWaitFrameStart(&instances[1].thread.impl->sync)) {
+		memcpy(snapshot1, instances[1].pixels, sizeof(snapshot1));
 	}
 	mCoreSyncWaitFrameEnd(&instances[1].thread.impl->sync);
-	mCoreSyncWaitFrameEnd(&instances[0].thread.impl->sync);
+
+	struct instance snap0 = { .pixels = snapshot0 };
+	struct instance snap1 = { .pixels = snapshot1 };
+	render(&snap0, &snap1, layout, renderer, texture);
 }
 
 // Safely mutate a running core's keys from the main thread, matching mgba's own
