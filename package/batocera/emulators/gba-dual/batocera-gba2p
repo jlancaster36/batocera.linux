@@ -3,10 +3,14 @@
 set -eu
 
 ROM=${1:?ROM path is required}
+shift
 LAYOUT=${gba_dual_layout:-horizontal}
 LINK=${gba_dual_link:-true}
 
-set -- --rom1 "$ROM" --rom2 "$ROM" --layout "$LAYOUT"
+# Appends whatever's left in "$@" (e.g. --controller1/--controller2, the SDL
+# joystick index per player appended by the configgen generator) after the
+# ROM-derived flags, before it gets replaced by this same `set --` call.
+set -- --rom1 "$ROM" --rom2 "$ROM" --layout "$LAYOUT" "$@"
 if [ "$LINK" = "true" ]; then
     set -- "$@" --link
 else

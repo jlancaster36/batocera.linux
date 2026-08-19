@@ -43,11 +43,18 @@ struct options {
 	bool link;
 	int frames;
 	const char* screenshot;
+	// SDL joystick index to open for each player; -1 means "auto-pick the
+	// first available controller" (used for standalone/dev testing). Set by
+	// Batocera's gba-dual configgen generator from each player's
+	// Controller.index, so P1/P2 in-game always matches whatever pad ES has
+	// assigned to that player slot.
+	int controller1;
+	int controller2;
 };
 
 static void usage(const char* program) {
 	fprintf(stderr, "Usage: %s --rom1 ROM --rom2 ROM [--layout horizontal|vertical] [--link|--no-link] "
-	                "[--frames N --screenshot PATH]\n", program);
+	                "[--frames N --screenshot PATH] [--controller1 INDEX] [--controller2 INDEX]\n", program);
 }
 
 // mGBA's default logger dumps every BIOS call and DMA transfer to stdout;
@@ -153,6 +160,8 @@ static void stop_audio(struct audio_mixer* mixer) {
 static bool parse_options(int argc, char** argv, struct options* options) {
 	options->layout = LAYOUT_HORIZONTAL;
 	options->link = true;
+	options->controller1 = -1;
+	options->controller2 = -1;
 	for (int i = 1; i < argc; ++i) {
 		if (!strcmp(argv[i], "--rom1") && i + 1 < argc) {
 			options->rom1 = argv[++i];
@@ -173,6 +182,10 @@ static bool parse_options(int argc, char** argv, struct options* options) {
 			options->frames = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) {
 			options->screenshot = argv[++i];
+		} else if (!strcmp(argv[i], "--controller1") && i + 1 < argc) {
+			options->controller1 = atoi(argv[++i]);
+		} else if (!strcmp(argv[i], "--controller2") && i + 1 < argc) {
+			options->controller2 = atoi(argv[++i]);
 		} else {
 			return false;
 		}
@@ -474,9 +487,30 @@ int main(int argc, char** argv) {
 	const int width = options.layout == LAYOUT_HORIZONTAL ? GBA_WIDTH * 2 : GBA_WIDTH;
 	const int height = options.layout == LAYOUT_HORIZONTAL ? GBA_HEIGHT : GBA_HEIGHT * 2;
 	SDL_GameController* controllers[2] = {0};
-	for (int i = 0, opened = 0; i < SDL_NumJoysticks() && opened < 2; ++i) {
-		if (SDL_IsGameController(i)) {
-			controllers[opened++] = SDL_GameControllerOpen(i);
+	// event.cbutton.which is an SDL joystick INSTANCE ID, not the enumeration
+	// index passed to SDL_GameControllerOpen() - it's only guaranteed to be 0
+	// for the very first controller ever opened in the process, so it cannot
+	// be compared against a raw 0/1 to identify which player pressed a
+	// button. Record each opened controller's real instance ID and match
+	// against that instead.
+	SDL_JoystickID controllerInstanceIds[2] = { -1, -1 };
+	const int requestedIndices[2] = { options.controller1, options.controller2 };
+	int autoIndex = 0;
+	for (int player = 0; player < 2; ++player) {
+		int index = requestedIndices[player];
+		if (index < 0) {
+			// Auto-pick the next available controller not already claimed by
+			// the other player (standalone/dev testing without configgen).
+			while (autoIndex < SDL_NumJoysticks() && !SDL_IsGameController(autoIndex)) {
+				++autoIndex;
+			}
+			index = autoIndex < SDL_NumJoysticks() ? autoIndex++ : -1;
+		}
+		if (index >= 0 && index < SDL_NumJoysticks() && SDL_IsGameController(index)) {
+			controllers[player] = SDL_GameControllerOpen(index);
+			if (controllers[player]) {
+				controllerInstanceIds[player] = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controllers[player]));
+			}
 		}
 	}
 	SDL_Window* window = SDL_CreateWindow("GBA 2 Players", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width * 3, height * 3, SDL_WINDOW_RESIZABLE);
@@ -515,7 +549,12 @@ int main(int argc, char** argv) {
 			if (event.type == SDL_QUIT || (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE)) {
 				running = false;
 			} else if (event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_CONTROLLERBUTTONUP) {
-				const int player = event.cbutton.which == 0 ? 0 : 1;
+				int player = -1;
+				if (event.cbutton.which == controllerInstanceIds[0]) player = 0;
+				else if (event.cbutton.which == controllerInstanceIds[1]) player = 1;
+				if (player < 0) {
+					continue;
+				}
 				const uint32_t button = map_button(&event.cbutton);
 				const bool down = event.type == SDL_CONTROLLERBUTTONDOWN;
 				if (options.link) set_linked_key(&instances[player], button, down);
