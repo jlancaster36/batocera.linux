@@ -18,9 +18,15 @@ The Batocera integration launches it through `batocera-gba2p`, which reads the
 - Two mGBA cores are loaded in one process.
 - SDL2 presentation and controller routing are implemented.
 - Horizontal and vertical compositing are implemented.
+- Real GBA link-cable sync (`--link`, the default) runs both cores on their
+  own `mCoreThread` with a shared `GBASIOLockstepCoordinator`, matching mgba's
+  own Qt frontend architecture. Verified against Mario Kart Super Circuit's
+  **Multi Pak** link mode. **Single Pak** mode (BIOS multiboot, for a second
+  console with no cartridge) is not applicable here since both instances
+  always load a full ROM, and is not implemented.
+- `--no-link` and the `--frames`/`--screenshot` headless test mode still use
+  the simpler single-thread synchronous loop (no real link timing).
 - Audio mixing is not yet connected to the SDL audio callback.
-- The mGBA GBA lockstep coordinator and link-port drivers still need to be
-  attached before link-cable games can be considered supported.
 
 The package deliberately stages the official mGBA library and headers so the
 frontend uses the real `mCore` API rather than an invented wrapper API.
