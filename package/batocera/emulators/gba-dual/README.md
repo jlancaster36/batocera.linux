@@ -24,3 +24,17 @@ The Batocera integration launches it through `batocera-gba2p`, which reads the
 
 The package deliberately stages the official mGBA library and headers so the
 frontend uses the real `mCore` API rather than an invented wrapper API.
+
+## Local test environment
+
+The full Batocera Buildroot toolchain is too slow for an edit/compile loop, so
+`test/` has two Docker-based tiers, both run from PowerShell:
+
+- `test/run-baseline.ps1` — builds the exact pinned mGBA commit completely
+  unmodified and runs mGBA's own cmocka unit test suite. No gba-dual code is
+  involved. Run this first, and again after bumping the pin, to confirm any
+  failure is not caused by upstream mGBA itself.
+- `test/run-tests.ps1` — builds gba-dual against that same pinned commit and
+  runs smoke tests that don't need a ROM or a display.
+
+Run the baseline before the gba-dual tests when diagnosing a new failure.
