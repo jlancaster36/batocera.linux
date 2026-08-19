@@ -7,6 +7,7 @@
 #include <SDL2/SDL.h>
 #include <mgba/flags.h>
 #include <mgba/core/core.h>
+#include <mgba/core/log.h>
 #include <mgba-util/image.h>
 #include <mgba-util/audio-buffer.h>
 #include <mgba-util/vfs.h>
@@ -39,6 +40,18 @@ static void usage(const char* program) {
 	fprintf(stderr, "Usage: %s --rom1 ROM --rom2 ROM [--layout horizontal|vertical] [--link|--no-link] "
 	                "[--frames N --screenshot PATH]\n", program);
 }
+
+// mGBA's default logger dumps every BIOS call and DMA transfer to stdout;
+// silence it so gba-dual's own output stays readable.
+static void discard_log(struct mLogger* logger, int category, enum mLogLevel level, const char* format, va_list args) {
+	(void) logger;
+	(void) category;
+	(void) level;
+	(void) format;
+	(void) args;
+}
+
+static struct mLogger nullLogger = { .log = discard_log };
 
 static bool parse_options(int argc, char** argv, struct options* options) {
 	options->layout = LAYOUT_HORIZONTAL;
@@ -98,6 +111,8 @@ static void destroy_instance(struct instance* instance) {
 	free(instance->pixels);
 }
 
+// Bit positions match enum GBAKey (mgba/internal/gba/input.h): A=0 B=1 Select=2
+// Start=3 Right=4 Left=5 Up=6 Down=7 R=8 L=9. The GBA has no X/Y buttons.
 static uint32_t map_button(const SDL_ControllerButtonEvent* event) {
 	switch (event->button) {
 	case SDL_CONTROLLER_BUTTON_A: return 1u << 0;
@@ -108,11 +123,38 @@ static uint32_t map_button(const SDL_ControllerButtonEvent* event) {
 	case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return 1u << 5;
 	case SDL_CONTROLLER_BUTTON_DPAD_UP: return 1u << 6;
 	case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return 1u << 7;
-	case SDL_CONTROLLER_BUTTON_X: return 1u << 8;
-	case SDL_CONTROLLER_BUTTON_Y: return 1u << 9;
-	case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return 1u << 10;
-	case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return 1u << 11;
+	case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return 1u << 8;
+	case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return 1u << 9;
 	default: return 0;
+	}
+}
+
+// Keyboard fallback so both players can be driven from one keyboard (no
+// physical gamepad passthrough into a container). Player 1 uses the arrow
+// cluster, player 2 uses WASD; the two sets share no keys.
+static uint32_t map_key(SDL_Keycode key, int* player) {
+	switch (key) {
+	case SDLK_UP: *player = 0; return 1u << 6;
+	case SDLK_DOWN: *player = 0; return 1u << 7;
+	case SDLK_LEFT: *player = 0; return 1u << 5;
+	case SDLK_RIGHT: *player = 0; return 1u << 4;
+	case SDLK_z: *player = 0; return 1u << 0;
+	case SDLK_x: *player = 0; return 1u << 1;
+	case SDLK_RETURN: *player = 0; return 1u << 3;
+	case SDLK_RSHIFT: *player = 0; return 1u << 2;
+	case SDLK_LEFTBRACKET: *player = 0; return 1u << 9;
+	case SDLK_RIGHTBRACKET: *player = 0; return 1u << 8;
+	case SDLK_w: *player = 1; return 1u << 6;
+	case SDLK_s: *player = 1; return 1u << 7;
+	case SDLK_a: *player = 1; return 1u << 5;
+	case SDLK_d: *player = 1; return 1u << 4;
+	case SDLK_j: *player = 1; return 1u << 0;
+	case SDLK_k: *player = 1; return 1u << 1;
+	case SDLK_SPACE: *player = 1; return 1u << 3;
+	case SDLK_LSHIFT: *player = 1; return 1u << 2;
+	case SDLK_u: *player = 1; return 1u << 9;
+	case SDLK_i: *player = 1; return 1u << 8;
+	default: *player = -1; return 0;
 	}
 }
 
@@ -210,6 +252,7 @@ static int run_headless(struct instance* instances, const struct options* option
 }
 
 int main(int argc, char** argv) {
+	mLogSetDefaultLogger(&nullLogger);
 	struct options options = {0};
 	struct instance instances[2] = {0};
 	if (!parse_options(argc, argv, &options)) {
@@ -236,6 +279,12 @@ int main(int argc, char** argv) {
 	}
 	const int width = options.layout == LAYOUT_HORIZONTAL ? GBA_WIDTH * 2 : GBA_WIDTH;
 	const int height = options.layout == LAYOUT_HORIZONTAL ? GBA_HEIGHT : GBA_HEIGHT * 2;
+	SDL_GameController* controllers[2] = {0};
+	for (int i = 0, opened = 0; i < SDL_NumJoysticks() && opened < 2; ++i) {
+		if (SDL_IsGameController(i)) {
+			controllers[opened++] = SDL_GameControllerOpen(i);
+		}
+	}
 	SDL_Window* window = SDL_CreateWindow("GBA 2 Players", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width * 3, height * 3, SDL_WINDOW_RESIZABLE);
 	SDL_Renderer* renderer = window ? SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC) : NULL;
 	SDL_Texture* texture = renderer ? SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, width, height) : NULL;
@@ -260,6 +309,13 @@ int main(int argc, char** argv) {
 				const uint32_t button = map_button(&event.cbutton);
 				if (event.type == SDL_CONTROLLERBUTTONDOWN) instances[player].keys |= button;
 				else instances[player].keys &= ~button;
+			} else if ((event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) && !event.key.repeat) {
+				int player = -1;
+				const uint32_t button = map_key(event.key.keysym.sym, &player);
+				if (player >= 0) {
+					if (event.type == SDL_KEYDOWN) instances[player].keys |= button;
+					else instances[player].keys &= ~button;
+				}
 			}
 		}
 		instances[0].core->setKeys(instances[0].core, instances[0].keys);
@@ -267,6 +323,11 @@ int main(int argc, char** argv) {
 		instances[0].core->runFrame(instances[0].core);
 		instances[1].core->runFrame(instances[1].core);
 		render(&instances[0], &instances[1], options.layout, renderer, texture);
+	}
+	for (int i = 0; i < 2; ++i) {
+		if (controllers[i]) {
+			SDL_GameControllerClose(controllers[i]);
+		}
 	}
 	SDL_DestroyTexture(texture);
 	SDL_DestroyRenderer(renderer);
