@@ -36,7 +36,7 @@ frontend uses the real `mCore` API rather than an invented wrapper API.
 ## Local test environment
 
 The full Batocera Buildroot toolchain is too slow for an edit/compile loop, so
-`test/` has two Docker-based tiers, both run from PowerShell:
+`test/` has four Docker-based tiers, all run from PowerShell:
 
 - `test/run-baseline.ps1` — builds the exact pinned mGBA commit completely
   unmodified and runs mGBA's own cmocka unit test suite. No gba-dual code is
@@ -52,5 +52,13 @@ The full Batocera Buildroot toolchain is too slow for an edit/compile loop, so
   `.dockerignore`) and never added to git. The screenshot in `test/out/` is
   git-ignored for the same copyright reason - don't commit ROMs or renders of
   copyrighted games.
+- `test/run-audio-smoke.ps1 -Rom "C:\path\to\game.gba"` — runs the
+  interactive `--link` session for a few seconds with SDL's `disk` audio
+  driver (writes raw PCM to a file instead of a speaker) and asserts the
+  capture isn't silence. This exists because gba-dual once ran cleanly,
+  crash-free, with a fully wired audio pipeline that produced 100% silence
+  (`core->opts.volume` defaulted to 0) - a bug no crash-based test could
+  catch. Same ROM handling as run-rom-smoke.ps1: bind-mounted only, never
+  committed.
 
 Run the baseline before the other tiers when diagnosing a new failure.

@@ -186,6 +186,14 @@ static bool load_instance(struct instance* instance, const char* path) {
 		return false;
 	}
 	mCoreInitConfig(instance->core, "gba-dual");
+	// mCoreLoadConfig() maps config into core->opts and then calls
+	// core->loadConfig(), which sets masterVolume = opts.volume - but only
+	// overwrites opts.volume if the config actually has a "volume" key,
+	// which ours never does. Left at its zero-init default, that's silence
+	// regardless of opts.mute. Seed the same full-volume default mgba's own
+	// Qt frontend uses, before config gets a chance to override it.
+	instance->core->opts.volume = 0x100;
+	instance->core->opts.mute = false;
 	mCoreLoadConfig(instance->core);
 	if (!mCoreLoadFile(instance->core, path)) {
 		instance->core->deinit(instance->core);
