@@ -8,6 +8,10 @@
 #include <mgba/flags.h>
 #include <mgba/core/core.h>
 #include <mgba/core/log.h>
+#include <mgba/core/lockstep.h>
+#include <mgba/core/thread.h>
+#include <mgba/gba/interface.h>
+#include <mgba/internal/gba/sio/lockstep.h>
 #include <mgba-util/image.h>
 #include <mgba-util/audio-buffer.h>
 #include <mgba-util/vfs.h>
@@ -25,6 +29,10 @@ struct instance {
 	struct mCore* core;
 	mColor* pixels;
 	uint32_t keys;
+	// Only used when running a real link-cable session (options.link, interactive mode).
+	struct mCoreThread thread;
+	struct mLockstepThreadUser lockstepUser;
+	struct GBASIOLockstepDriver lockstepDriver;
 };
 
 struct options {
@@ -251,6 +259,76 @@ static int run_headless(struct instance* instances, const struct options* option
 	return exitCode;
 }
 
+// Real GBA link-cable sync (Pokemon trading, Mario Kart multiplayer, etc.) needs
+// both cores to run on their own mCoreThread: the GBA SIO multiplayer hardware
+// emulation blocks one core's CPU thread mid-instruction until the other side's
+// data is ready, which only mgba's GBASIOLockstepCoordinator/Driver + a real
+// OS thread per core can do correctly. This is exactly how mgba's own Qt
+// frontend (MultiplayerController.cpp) wires up multiplayer.
+static bool start_link_session(struct instance instances[2], struct GBASIOLockstepCoordinator* coordinator) {
+	GBASIOLockstepCoordinatorInit(coordinator);
+	for (int i = 0; i < 2; ++i) {
+		// mCoreThreadStart() snapshots core->opts into the thread's sync object,
+		// so videoSync must be forced on before starting, not after.
+		instances[i].core->opts.videoSync = true;
+		instances[i].thread.core = instances[i].core;
+		// Each core thread installs its own per-thread logger that bypasses the
+		// process-wide default logger, so it must be silenced separately too.
+		instances[i].thread.logger.logger = &nullLogger;
+		if (!mCoreThreadStart(&instances[i].thread)) {
+			return false;
+		}
+	}
+	for (int i = 0; i < 2; ++i) {
+		mLockstepThreadUserInit(&instances[i].lockstepUser, &instances[i].thread);
+		GBASIOLockstepDriverCreate(&instances[i].lockstepDriver, &instances[i].lockstepUser.d);
+	}
+	for (int i = 0; i < 2; ++i) {
+		GBASIOLockstepCoordinatorAttach(coordinator, &instances[i].lockstepDriver);
+		instances[i].core->setPeripheral(instances[i].core, mPERIPH_GBA_LINK_PORT, &instances[i].lockstepDriver.d);
+	}
+	return true;
+}
+
+static void stop_link_session(struct instance instances[2], struct GBASIOLockstepCoordinator* coordinator) {
+	for (int i = 0; i < 2; ++i) {
+		mCoreThreadEnd(&instances[i].thread);
+	}
+	for (int i = 0; i < 2; ++i) {
+		mCoreThreadJoin(&instances[i].thread);
+	}
+	for (int i = 0; i < 2; ++i) {
+		instances[i].core->setPeripheral(instances[i].core, mPERIPH_GBA_LINK_PORT, NULL);
+		GBASIOLockstepCoordinatorDetach(coordinator, &instances[i].lockstepDriver);
+	}
+	GBASIOLockstepCoordinatorDeinit(coordinator);
+}
+
+// Blocks until both threaded cores have a completed frame ready, composites and
+// presents it, then releases both so they can render their next frame. Mirrors
+// mgba's own sw-sdl2.c runloop (WaitFrameStart/WaitFrameEnd), extended to two cores.
+static void render_linked(struct instance instances[2], enum layout layout, SDL_Renderer* renderer, SDL_Texture* texture) {
+	const bool ready0 = mCoreSyncWaitFrameStart(&instances[0].thread.impl->sync);
+	const bool ready1 = mCoreSyncWaitFrameStart(&instances[1].thread.impl->sync);
+	if (ready0 && ready1) {
+		render(&instances[0], &instances[1], layout, renderer, texture);
+	}
+	mCoreSyncWaitFrameEnd(&instances[1].thread.impl->sync);
+	mCoreSyncWaitFrameEnd(&instances[0].thread.impl->sync);
+}
+
+// Safely mutate a running core's keys from the main thread, matching mgba's own
+// sdl-events.c pattern (interrupt the core thread, mutate, continue).
+static void set_linked_key(struct instance* instance, uint32_t button, bool down) {
+	mCoreThreadInterrupt(&instance->thread);
+	if (down) {
+		instance->core->addKeys(instance->core, button);
+	} else {
+		instance->core->clearKeys(instance->core, button);
+	}
+	mCoreThreadContinue(&instance->thread);
+}
+
 int main(int argc, char** argv) {
 	mLogSetDefaultLogger(&nullLogger);
 	struct options options = {0};
@@ -298,6 +376,17 @@ int main(int argc, char** argv) {
 		destroy_instance(&instances[1]);
 		return EXIT_FAILURE;
 	}
+	struct GBASIOLockstepCoordinator coordinator;
+	if (options.link && !start_link_session(instances, &coordinator)) {
+		fprintf(stderr, "gba-dual: failed to start link-cable session\n");
+		SDL_DestroyTexture(texture);
+		SDL_DestroyRenderer(renderer);
+		SDL_DestroyWindow(window);
+		SDL_Quit();
+		destroy_instance(&instances[0]);
+		destroy_instance(&instances[1]);
+		return EXIT_FAILURE;
+	}
 	bool running = true;
 	while (running) {
 		SDL_Event event;
@@ -307,22 +396,33 @@ int main(int argc, char** argv) {
 			} else if (event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_CONTROLLERBUTTONUP) {
 				const int player = event.cbutton.which == 0 ? 0 : 1;
 				const uint32_t button = map_button(&event.cbutton);
-				if (event.type == SDL_CONTROLLERBUTTONDOWN) instances[player].keys |= button;
+				const bool down = event.type == SDL_CONTROLLERBUTTONDOWN;
+				if (options.link) set_linked_key(&instances[player], button, down);
+				else if (down) instances[player].keys |= button;
 				else instances[player].keys &= ~button;
 			} else if ((event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) && !event.key.repeat) {
 				int player = -1;
 				const uint32_t button = map_key(event.key.keysym.sym, &player);
 				if (player >= 0) {
-					if (event.type == SDL_KEYDOWN) instances[player].keys |= button;
+					const bool down = event.type == SDL_KEYDOWN;
+					if (options.link) set_linked_key(&instances[player], button, down);
+					else if (down) instances[player].keys |= button;
 					else instances[player].keys &= ~button;
 				}
 			}
 		}
-		instances[0].core->setKeys(instances[0].core, instances[0].keys);
-		instances[1].core->setKeys(instances[1].core, instances[1].keys);
-		instances[0].core->runFrame(instances[0].core);
-		instances[1].core->runFrame(instances[1].core);
-		render(&instances[0], &instances[1], options.layout, renderer, texture);
+		if (options.link) {
+			render_linked(instances, options.layout, renderer, texture);
+		} else {
+			instances[0].core->setKeys(instances[0].core, instances[0].keys);
+			instances[1].core->setKeys(instances[1].core, instances[1].keys);
+			instances[0].core->runFrame(instances[0].core);
+			instances[1].core->runFrame(instances[1].core);
+			render(&instances[0], &instances[1], options.layout, renderer, texture);
+		}
+	}
+	if (options.link) {
+		stop_link_session(instances, &coordinator);
 	}
 	for (int i = 0; i < 2; ++i) {
 		if (controllers[i]) {
