@@ -131,3 +131,43 @@ driver and GPU (confirmed: this is exactly what caused a "Couldn't find
 matching render driver" failure on real hardware). Copy the resulting tarball
 to the device (e.g. `scp` to `/userdata`) and extract/run it to smoke-test on
 real ARM64 hardware before a full EmulationStation integration test.
+
+## Testing the ES integration on an already-installed Batocera device
+
+For iterating on the EmulationStation/configgen integration without a full
+Buildroot image rebuild, you can hand-patch a live device directly (see
+"EmulationStation / configgen integration" above for exactly what needs to
+change: `configgen-defaults.yml`, `importer.py`'s `_GENERATOR_MAP`,
+`es_systems.cfg`, plus installing the binary/lib/launcher/generator to their
+real system paths). This works because `/usr` and `/etc` are writable at
+runtime, but **it does not persist**: Batocera's root filesystem is an
+ephemeral, RAM-backed overlay (`overlay` mount with
+`lowerdir=/overlay_root/base,upperdir=/overlay_root/overlay`) - only
+`/userdata` survives a reboot, so all of this is lost the next time the
+device restarts.
+
+`test/custom.sh` is a copy-to-`/userdata/system/custom.sh` boot hook (a real,
+Batocera-supported mechanism - see `/etc/init.d/S99userservices`) that
+reapplies the whole live install automatically on every boot, reading its
+binary/lib/launcher/generator inputs from a persistent staging directory
+(`/userdata/gba-dual-test/`, produced by `build-aarch64.ps1` plus a couple of
+extra files - see the comment at the top of `test/custom.sh`). It's
+idempotent (checks before patching each file) and restarts EmulationStation
+itself at the end, since `S99userservices` runs after `S31emulationstation`
+has already started. This is a live-testing convenience only, not part of
+the real package - a proper image build makes it unnecessary.
+
+## Known issues
+
+- **Intermittent on real hardware, `--link` mode, not yet root-caused**: the
+  first `--link` launch through EmulationStation after a fresh device boot
+  has been observed once with one screen stuck (not advancing) and framerate
+  around 18fps instead of the usual ~60fps, followed by a segfault during
+  process teardown (after the SDL_QUIT path had already started, per the
+  trace log - not during the steady-state render loop). Immediately retrying
+  the identical launch worked normally with no code changes, which points to
+  a genuine timing-sensitive race rather than a deterministic bug - possibly
+  in `mCoreThread` startup/teardown ordering, which real ARM hardware
+  (weaker memory ordering, RK3588's mixed Cortex-A76/A55 scheduling) can
+  expose in ways x86 Docker testing does not. Needs a reliable repro (e.g.
+  launching/quitting in a loop) before it can be debugged further.
