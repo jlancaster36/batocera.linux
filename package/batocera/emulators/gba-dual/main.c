@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -232,10 +233,15 @@ static void destroy_instance(struct instance* instance) {
 
 // Bit positions match enum GBAKey (mgba/internal/gba/input.h): A=0 B=1 Select=2
 // Start=3 Right=4 Left=5 Up=6 Down=7 R=8 L=9. The GBA has no X/Y buttons.
+// SDL's ABXY naming follows Xbox physical position (A=bottom, B=right), but
+// real GBA hardware (and every RetroArch/mgba default binding) puts A on the
+// right and B below-left - so the physical bottom button is bound to GBA B
+// and the physical right button to GBA A, matching the existing GBA system's
+// established feel rather than a literal label-for-label match.
 static uint32_t map_button(const SDL_ControllerButtonEvent* event) {
 	switch (event->button) {
-	case SDL_CONTROLLER_BUTTON_A: return 1u << 0;
-	case SDL_CONTROLLER_BUTTON_B: return 1u << 1;
+	case SDL_CONTROLLER_BUTTON_A: return 1u << 1;
+	case SDL_CONTROLLER_BUTTON_B: return 1u << 0;
 	case SDL_CONTROLLER_BUTTON_BACK: return 1u << 2;
 	case SDL_CONTROLLER_BUTTON_START: return 1u << 3;
 	case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return 1u << 4;
@@ -245,6 +251,22 @@ static uint32_t map_button(const SDL_ControllerButtonEvent* event) {
 	case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return 1u << 8;
 	case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return 1u << 9;
 	default: return 0;
+	}
+}
+
+static const uint32_t DPAD_KEY_MASK = (1u << 4) | (1u << 5) | (1u << 6) | (1u << 7);
+
+// Applies a fully-computed D-pad nibble (digital D-pad bits OR'd with
+// analog-stick-derived bits), replacing only the 4 direction bits so it never
+// clobbers A/B/L/R/Start/Select state tracked elsewhere.
+static void apply_dpad(struct instance* instance, bool linked, uint32_t dpadBits) {
+	if (linked) {
+		mCoreThreadInterrupt(&instance->thread);
+		instance->core->clearKeys(instance->core, DPAD_KEY_MASK);
+		instance->core->addKeys(instance->core, dpadBits & DPAD_KEY_MASK);
+		mCoreThreadContinue(&instance->thread);
+	} else {
+		instance->keys = (instance->keys & ~DPAD_KEY_MASK) | (dpadBits & DPAD_KEY_MASK);
 	}
 }
 
@@ -309,8 +331,24 @@ static void render(struct instance* first, struct instance* second, enum layout 
 		return;
 	}
 	SDL_UpdateTexture(texture, NULL, composite, width * (int) sizeof(*composite));
+
+	// Preserve each player's native 4:3-per-screen aspect ratio; letterbox/pillarbox
+	// instead of stretching to fill the window (e.g. when sway forces fullscreen).
+	int outputWidth = width;
+	int outputHeight = height;
+	SDL_GetRendererOutputSize(renderer, &outputWidth, &outputHeight);
+	const double scale = fmin((double) outputWidth / width, (double) outputHeight / height);
+	const int destWidth = (int) (width * scale);
+	const int destHeight = (int) (height * scale);
+	const SDL_Rect dest = {
+		.x = (outputWidth - destWidth) / 2,
+		.y = (outputHeight - destHeight) / 2,
+		.w = destWidth,
+		.h = destHeight,
+	};
+
 	SDL_RenderClear(renderer);
-	SDL_RenderCopy(renderer, texture, NULL, NULL);
+	SDL_RenderCopy(renderer, texture, NULL, &dest);
 	SDL_RenderPresent(renderer);
 	free(composite);
 }
@@ -484,8 +522,33 @@ int main(int argc, char** argv) {
 		destroy_instance(&instances[1]);
 		return EXIT_FAILURE;
 	}
+	// Batocera's ES/configgen path supplies SDL_GAMECONTROLLERCONFIG for the
+	// paired controllers, but not every pad SDL recognizes as a "real" SDL2
+	// build's compiled-in db - many common pads (e.g. generic DragonRise USB
+	// boards) are only present in the community gamecontrollerdb.txt files
+	// Batocera already bundles for other emulators. Load those too as a
+	// fallback so such pads work even without an explicit env var mapping.
+	static const char* const systemControllerDbPaths[] = {
+		"/usr/share/sdl-jstest/gamecontrollerdb.txt",
+		"/usr/share/moonlight/gamecontrollerdb.txt",
+		"/usr/share/ppsspp/PPSSPP/gamecontrollerdb.txt",
+		"/usr/share/batocera/datainit/system/configs/amiberry/conf/gamecontrollerdb.txt",
+	};
+	for (size_t i = 0; i < sizeof(systemControllerDbPaths) / sizeof(systemControllerDbPaths[0]); ++i) {
+		SDL_GameControllerAddMappingsFromFile(systemControllerDbPaths[i]);
+	}
 	const int width = options.layout == LAYOUT_HORIZONTAL ? GBA_WIDTH * 2 : GBA_WIDTH;
 	const int height = options.layout == LAYOUT_HORIZONTAL ? GBA_HEIGHT : GBA_HEIGHT * 2;
+	fprintf(stderr, "gba-dual: [trace] SDL_NumJoysticks()=%d, SDL_GAMECONTROLLERCONFIG=%s\n",
+		SDL_NumJoysticks(), getenv("SDL_GAMECONTROLLERCONFIG") ? "set" : "(unset)");
+	for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+		char guidStr[64] = {0};
+		SDL_JoystickGUID guid = SDL_JoystickGetDeviceGUID(i);
+		SDL_JoystickGetGUIDString(guid, guidStr, sizeof(guidStr));
+		fprintf(stderr, "gba-dual: [trace] joystick %d: name=%s guid=%s isGameController=%d\n",
+			i, SDL_JoystickNameForIndex(i), guidStr, SDL_IsGameController(i));
+	}
+	fflush(stderr);
 	SDL_GameController* controllers[2] = {0};
 	// event.cbutton.which is an SDL joystick INSTANCE ID, not the enumeration
 	// index passed to SDL_GameControllerOpen() - it's only guaranteed to be 0
@@ -510,9 +573,17 @@ int main(int argc, char** argv) {
 			controllers[player] = SDL_GameControllerOpen(index);
 			if (controllers[player]) {
 				controllerInstanceIds[player] = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controllers[player]));
+				fprintf(stderr, "gba-dual: [trace] player %d opened controller index=%d instanceId=%d\n",
+					player, index, controllerInstanceIds[player]);
+			} else {
+				fprintf(stderr, "gba-dual: [trace] player %d SDL_GameControllerOpen(%d) failed: %s\n",
+					player, index, SDL_GetError());
 			}
+		} else {
+			fprintf(stderr, "gba-dual: [trace] player %d got no controller (requested=%d)\n", player, requestedIndices[player]);
 		}
 	}
+	fflush(stderr);
 	SDL_Window* window = SDL_CreateWindow("GBA 2 Players", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width * 3, height * 3, SDL_WINDOW_RESIZABLE);
 	SDL_Renderer* renderer = window ? SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC) : NULL;
 	SDL_Texture* texture = renderer ? SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, width, height) : NULL;
@@ -526,6 +597,8 @@ int main(int argc, char** argv) {
 		destroy_instance(&instances[1]);
 		return EXIT_FAILURE;
 	}
+	fprintf(stderr, "gba-dual: [trace] window/renderer/texture created (driver=%s)\n", SDL_GetCurrentVideoDriver());
+	fflush(stderr);
 	struct GBASIOLockstepCoordinator coordinator;
 	if (options.link && !start_link_session(instances, &coordinator)) {
 		fprintf(stderr, "gba-dual: failed to start link-cable session\n");
@@ -543,10 +616,18 @@ int main(int argc, char** argv) {
 		fprintf(stderr, "gba-dual: continuing without audio\n");
 	}
 	bool running = true;
+	long frameCount = 0;
+	uint32_t digitalDpad[2] = {0};
+	uint32_t analogDpad[2] = {0};
+	// Deadzone for the left stick's D-pad emulation, out of INT16_MAX (~37%) -
+	// high enough to ignore analog drift/noise on cheap pads.
+	static const int16_t AXIS_DEADZONE = 12000;
 	while (running) {
 		SDL_Event event;
 		while (SDL_PollEvent(&event)) {
 			if (event.type == SDL_QUIT || (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE)) {
+				fprintf(stderr, "gba-dual: [trace] quitting after %ld frames, event.type=0x%x\n", frameCount, event.type);
+				fflush(stderr);
 				running = false;
 			} else if (event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_CONTROLLERBUTTONUP) {
 				int player = -1;
@@ -556,10 +637,42 @@ int main(int argc, char** argv) {
 					continue;
 				}
 				const uint32_t button = map_button(&event.cbutton);
+				if (button == 0) {
+					continue;
+				}
 				const bool down = event.type == SDL_CONTROLLERBUTTONDOWN;
-				if (options.link) set_linked_key(&instances[player], button, down);
-				else if (down) instances[player].keys |= button;
-				else instances[player].keys &= ~button;
+				if (button & DPAD_KEY_MASK) {
+					if (down) digitalDpad[player] |= button;
+					else digitalDpad[player] &= ~button;
+					apply_dpad(&instances[player], options.link, digitalDpad[player] | analogDpad[player]);
+				} else if (options.link) {
+					set_linked_key(&instances[player], button, down);
+				} else if (down) {
+					instances[player].keys |= button;
+				} else {
+					instances[player].keys &= ~button;
+				}
+			} else if (event.type == SDL_CONTROLLERAXISMOTION) {
+				int player = -1;
+				if (event.caxis.which == controllerInstanceIds[0]) player = 0;
+				else if (event.caxis.which == controllerInstanceIds[1]) player = 1;
+				if (player < 0) {
+					continue;
+				}
+				if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
+					analogDpad[player] &= ~((1u << 4) | (1u << 5));
+					if (event.caxis.value > AXIS_DEADZONE) analogDpad[player] |= 1u << 4; // Right
+					else if (event.caxis.value < -AXIS_DEADZONE) analogDpad[player] |= 1u << 5; // Left
+					apply_dpad(&instances[player], options.link, digitalDpad[player] | analogDpad[player]);
+				} else if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+					analogDpad[player] &= ~((1u << 6) | (1u << 7));
+					// This pad's Y axis is inverted vs. the usual SDL convention
+					// (negative=up) - positive value here means the stick was
+					// pushed up.
+					if (event.caxis.value > AXIS_DEADZONE) analogDpad[player] |= 1u << 6; // Up
+					else if (event.caxis.value < -AXIS_DEADZONE) analogDpad[player] |= 1u << 7; // Down
+					apply_dpad(&instances[player], options.link, digitalDpad[player] | analogDpad[player]);
+				}
 			} else if ((event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) && !event.key.repeat) {
 				int player = -1;
 				const uint32_t button = map_key(event.key.keysym.sym, &player);
@@ -579,6 +692,11 @@ int main(int argc, char** argv) {
 			instances[0].core->runFrame(instances[0].core);
 			instances[1].core->runFrame(instances[1].core);
 			render(&instances[0], &instances[1], options.layout, renderer, texture);
+		}
+		++frameCount;
+		if (frameCount == 1) {
+			fprintf(stderr, "gba-dual: [trace] first frame rendered\n");
+			fflush(stderr);
 		}
 	}
 	if (audioStarted) {
