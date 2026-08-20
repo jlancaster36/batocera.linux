@@ -270,8 +270,13 @@ gba2players:
   manufacturer: Nintendo
   release: 2001
   hardware: portable
-  extensions: [gba, zip]
+  extensions: [gba]
   group:      gba
+  # Shares the regular gba system's ROM folder (and therefore its scraped
+  # gamelist.xml/box art) instead of a separate, empty folder - both systems
+  # just load the same .gba files, one via libretro/mgba (single player), the
+  # other via gba-dual (2-player split-screen).
+  path:       gba
   emulators:
     gba-dual:
       gba-dual: { requireAnyOf: [BR2_PACKAGE_GBA_DUAL], incompatible_extensions: [zip] }
