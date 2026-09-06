@@ -1,0 +1,8 @@
+config BR2_PACKAGE_GBA_DUAL
+	bool "gba-dual"
+	select BR2_PACKAGE_SDL2
+	help
+	  Native two-instance GBA compositor using the official mGBA core library.
+	  Provides horizontal and vertical split layouts with one controller per core.
+
+	  https://github.com/mgba-emu/mgba

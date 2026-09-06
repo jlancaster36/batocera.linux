@@ -284,6 +284,9 @@ gb2players:
 gba:
   emulator: libretro
   core:     mgba
+gba2players:
+  emulator: gba-dual
+  core:     gba-dual
 gbc:
   emulator: libretro
   core:     gambatte
