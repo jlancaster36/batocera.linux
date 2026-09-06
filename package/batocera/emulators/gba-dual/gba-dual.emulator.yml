@@ -4,6 +4,7 @@ shared_features:
   - powermode
   - tdp
   - videomode
+  - bezel
 custom_features:
   gba_dual_layout:
     prompt: SPLIT LAYOUT

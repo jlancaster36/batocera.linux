@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from ... import Command
 from ...controller import Controller, generate_sdl_game_controller_config
+from ...utils import bezels as bezelsUtil
 from ..Generator import Generator
 
 if TYPE_CHECKING:
@@ -11,6 +12,14 @@ if TYPE_CHECKING:
 
 
 class GbaDualGenerator(Generator):
+    # gba-dual composites its own bezel internally (see main.c), auto-detecting
+    # each player's screen cutout from the bezel PNG's transparent areas rather
+    # than relying on Batocera's external batocera-bezel-overlay process and its
+    # 4:3-only cover-ratio heuristics, which reject a genuinely wide dual-screen
+    # layout.
+    def supportsInternalBezels(self) -> bool:
+        return True
+
     def getHotkeysContext(self) -> HotkeysContext:
         return {
             "name": "gba-dual",
@@ -33,6 +42,12 @@ class GbaDualGenerator(Generator):
         if player2 is not None:
             commandArray += ["--controller2", str(player2.index)]
 
+        bezel = system.config.get_str("bezel", "none")
+        if bezel and bezel != "none":
+            bz_infos = bezelsUtil.getBezelInfos(rom, bezel, system.name, system.config.emulator)
+            if bz_infos is not None and bz_infos["png"].exists():
+                commandArray += ["--bezel", str(bz_infos["png"])]
+
         return Command.Command(
             array=commandArray,
             env={
@@ -44,3 +59,4 @@ class GbaDualGenerator(Generator):
 
     def getInGameRatio(self, config, gameResolution, rom):
         return 3 / 2 if config.get("gba_dual_layout", "horizontal") == "horizontal" else 3 / 4
+
