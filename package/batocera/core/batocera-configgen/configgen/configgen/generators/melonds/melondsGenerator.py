@@ -17,6 +17,27 @@ _MELONDS_ROMS: Final = ROMS / "nds"
 _MELONDS_CHEATS: Final = CHEATS / "melonDS"
 _MELONDS_CONFIG: Final = CONFIGS / "melonDS"
 
+
+def _apply_dual_screen_layout(system_config: Any, base_config: dict[str, Any], /) -> None:
+    window0 = base_config["Instance0"]["Window0"]
+    window1 = base_config["Instance0"]["Window1"]
+
+    display_mode = system_config.get_str("melonds_dual_screen_mode", "main")
+    layout = system_config.get_int("melonds_dual_screen_layout", 2)
+
+    window0["DisplayIndex"] = 0
+    window1["DisplayIndex"] = 1 if display_mode == "secondary" else 0
+    window0["ScreenLayout"] = layout
+    window1["ScreenLayout"] = layout
+    # Only open a second top-level window when routing to a secondary display;
+    # in main mode both screens render combined inside Window0 via ScreenLayout.
+    window1["Enabled"] = (display_mode == "secondary")
+
+    if display_mode == "secondary":
+        window0["ScreenSwap"] = False
+        window1["ScreenSwap"] = False
+
+
 class MelonDSGenerator(Generator):
 
     def getHotkeysContext(self) -> HotkeysContext:
@@ -171,17 +192,17 @@ class MelonDSGenerator(Generator):
             # Window0 (Top Screen)
             base_config["Instance0"]["Window0"]["ScreenRotation"] = 0
             base_config["Instance0"]["Window0"]["ScreenSwap"] = False
-            base_config["Instance0"]["Window0"]["ScreenLayout"] = 0
             base_config["Instance0"]["Window0"]["ScreenSizing"] = 4
             base_config["Instance0"]["Window0"]["IntegerScaling"] = scaling
 
             # Window1 (Bottom Screen)
-            base_config["Instance0"]["Window1"]["Enabled"] = True
             base_config["Instance0"]["Window1"]["ScreenRotation"] = 0
             base_config["Instance0"]["Window1"]["ScreenSwap"] = False
-            base_config["Instance0"]["Window1"]["ScreenLayout"] = 0
             base_config["Instance0"]["Window1"]["ScreenSizing"] = 5
             base_config["Instance0"]["Window1"]["IntegerScaling"] = scaling
+
+            # DisplayIndex/ScreenLayout routing (main vs. secondary output)
+            _apply_dual_screen_layout(system.config, base_config)
         else:
             base_config["Instance0"]["Window1"]["Enabled"] = False
             base_config["Instance0"]["Window0"]["ScreenRotation"] = system.config.get_int("melonds_rotation", 0)

@@ -1,0 +1,20 @@
+diff --git a/src/frontend/qt_sdl/Window.cpp b/src/frontend/qt_sdl/Window.cpp
+index b0181ee6bf..c1a2b3d4e5 100644
+--- a/src/frontend/qt_sdl/Window.cpp
++++ b/src/frontend/qt_sdl/Window.cpp
+@@ -704,9 +704,13 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent) :
+         setWindowState(windowState() & ~Qt::WindowFullScreen);
+     }
+     
+-    // Batocera - Resize the window to match the primary screen size
+-    QScreen *screen = QGuiApplication::primaryScreen();
++    // Batocera - Resize (and, if requested, move) the window to match its
++    // target screen size, so a second window can be routed to a secondary display
++    int dispIdx = windowCfg.GetInt("DisplayIndex");
++    QList<QScreen*> screens = QGuiApplication::screens();
++    QScreen *screen = (dispIdx >= 0 && dispIdx < screens.size()) ? screens[dispIdx] : QGuiApplication::primaryScreen();
+     QRect screenGeometry = screen->geometry();
++    move(screenGeometry.topLeft());
+     resize(screenGeometry.width(), screenGeometry.height());
+     
+     show();
