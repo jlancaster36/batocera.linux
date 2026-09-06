@@ -181,6 +181,20 @@ custom_features:
     choices:
       'Off': false
       'On': true
+  melonds_dual_screen_mode:
+    prompt: DUAL SCREEN DISPLAY
+    description: Keep both DS screens on the main display or move the bottom screen to the secondary display.
+    choices:
+      Main display (both screens): main
+      Secondary display (bottom screen): secondary
+  melonds_dual_screen_layout:
+    prompt: DUAL SCREEN LAYOUT
+    description: Select how the two DS screens are laid out when dual-screen mode is enabled.
+    choices:
+      Original screen positions: 0
+      Vertical stack: 1
+      Horizontal split: 2
+      Hybrid: 3
   melonds_cheats:
     prompt: ENABLE CHEATS
     choices:
