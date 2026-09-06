@@ -51,11 +51,29 @@ struct options {
 	// assigned to that player slot.
 	int controller1;
 	int controller2;
+	// Optional path to a decoration/bezel PNG, resolved by Batocera's own
+	// bezel lookup convention (configgen's bezelsUtil.getBezelInfos) and
+	// passed in by gbaDualGenerator.py. NULL means no bezel selected.
+	const char* bezel;
+};
+
+// A loaded bezel: the full-canvas artwork texture plus the two "screen window"
+// rects (in the bezel's own native pixel space) auto-detected from its
+// transparent areas, one per player. Internal to gba-dual so it doesn't
+// depend on Batocera's external overlay process or its 4:3-only ratio
+// heuristics, which don't apply to a dual-screen layout.
+struct bezel {
+	SDL_Texture* texture;
+	int width;
+	int height;
+	SDL_Rect left;
+	SDL_Rect right;
+	bool valid;
 };
 
 static void usage(const char* program) {
 	fprintf(stderr, "Usage: %s --rom1 ROM --rom2 ROM [--layout horizontal|vertical] [--link|--no-link] "
-	                "[--frames N --screenshot PATH] [--controller1 INDEX] [--controller2 INDEX]\n", program);
+	                "[--frames N --screenshot PATH] [--controller1 INDEX] [--controller2 INDEX] [--bezel PATH]\n", program);
 }
 
 // mGBA's default logger dumps every BIOS call and DMA transfer to stdout;
@@ -187,11 +205,88 @@ static bool parse_options(int argc, char** argv, struct options* options) {
 			options->controller1 = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--controller2") && i + 1 < argc) {
 			options->controller2 = atoi(argv[++i]);
+		} else if (!strcmp(argv[i], "--bezel") && i + 1 < argc) {
+			options->bezel = argv[++i];
 		} else {
 			return false;
 		}
 	}
 	return options->rom1 && options->rom2 && options->frames >= 0;
+}
+
+// Scans an ABGR8 image's alpha channel, within [xStart, xEnd), for the
+// bounding box of fully transparent pixels - this is where the bezel artwork
+// leaves a "screen window" for one player's GBA output to show through.
+static SDL_Rect find_transparent_bounds(const struct mImage* image, int xStart, int xEnd) {
+	int minX = xEnd, minY = (int) image->height, maxX = xStart - 1, maxY = -1;
+	for (int y = 0; y < (int) image->height; ++y) {
+		for (int x = xStart; x < xEnd; ++x) {
+			const uint32_t pixel = mImageGetPixelRaw(image, (unsigned) x, (unsigned) y);
+			// mCOLOR_ABGR8: alpha is the most significant byte.
+			const uint8_t alpha = (uint8_t) (pixel >> 24);
+			if (alpha == 0) {
+				if (x < minX) minX = x;
+				if (x > maxX) maxX = x;
+				if (y < minY) minY = y;
+				if (y > maxY) maxY = y;
+			}
+		}
+	}
+	if (maxX < minX || maxY < minY) {
+		return (SDL_Rect){0, 0, 0, 0};
+	}
+	return (SDL_Rect){ minX, minY, maxX - minX + 1, maxY - minY + 1 };
+}
+
+// Loads a bezel PNG and auto-detects its two per-player screen cutouts by
+// splitting the image at its horizontal midpoint and finding the transparent
+// bounding box on each side. Only meaningful for LAYOUT_HORIZONTAL artwork;
+// callers should skip bezel compositing for LAYOUT_VERTICAL.
+static bool load_bezel(SDL_Renderer* renderer, const char* path, struct bezel* out) {
+	memset(out, 0, sizeof(*out));
+	struct mImage* raw = mImageLoad(path);
+	if (!raw) {
+		fprintf(stderr, "gba-dual: failed to load bezel image: %s\n", path);
+		return false;
+	}
+	struct mImage* image = mImageConvertToFormat(raw, mCOLOR_ABGR8);
+	mImageDestroy(raw);
+	if (!image) {
+		fprintf(stderr, "gba-dual: failed to convert bezel image to ABGR8: %s\n", path);
+		return false;
+	}
+	const int mid = (int) image->width / 2;
+	out->left = find_transparent_bounds(image, 0, mid);
+	out->right = find_transparent_bounds(image, mid, (int) image->width);
+	if (out->left.w <= 0 || out->right.w <= 0) {
+		fprintf(stderr, "gba-dual: bezel %s has no detectable screen cutouts, ignoring\n", path);
+		mImageDestroy(image);
+		return false;
+	}
+	out->texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, (int) image->width, (int) image->height);
+	if (!out->texture) {
+		fprintf(stderr, "gba-dual: failed to create bezel texture: %s\n", SDL_GetError());
+		mImageDestroy(image);
+		return false;
+	}
+	SDL_SetTextureBlendMode(out->texture, SDL_BLENDMODE_BLEND);
+	SDL_UpdateTexture(out->texture, NULL, image->data, (int) (image->stride * image->depth));
+	out->width = (int) image->width;
+	out->height = (int) image->height;
+	out->valid = true;
+	fprintf(stderr, "gba-dual: loaded bezel %s (%dx%d), left screen=%d,%d %dx%d right screen=%d,%d %dx%d\n",
+		path, out->width, out->height, out->left.x, out->left.y, out->left.w, out->left.h,
+		out->right.x, out->right.y, out->right.w, out->right.h);
+	mImageDestroy(image);
+	return true;
+}
+
+static void destroy_bezel(struct bezel* bezel) {
+	if (bezel->texture) {
+		SDL_DestroyTexture(bezel->texture);
+		bezel->texture = NULL;
+	}
+	bezel->valid = false;
 }
 
 static bool load_instance(struct instance* instance, const char* path) {
@@ -324,7 +419,7 @@ static uint32_t* compose(struct instance* first, struct instance* second, enum l
 	return composite;
 }
 
-static void render(struct instance* first, struct instance* second, enum layout layout, SDL_Renderer* renderer, SDL_Texture* texture) {
+static void render(struct instance* first, struct instance* second, enum layout layout, SDL_Renderer* renderer, SDL_Texture* texture, const struct bezel* bezel) {
 	int width, height;
 	uint32_t* composite = compose(first, second, layout, &width, &height);
 	if (!composite) {
@@ -332,23 +427,61 @@ static void render(struct instance* first, struct instance* second, enum layout 
 	}
 	SDL_UpdateTexture(texture, NULL, composite, width * (int) sizeof(*composite));
 
-	// Preserve each player's native 4:3-per-screen aspect ratio; letterbox/pillarbox
-	// instead of stretching to fill the window (e.g. when sway forces fullscreen).
 	int outputWidth = width;
 	int outputHeight = height;
 	SDL_GetRendererOutputSize(renderer, &outputWidth, &outputHeight);
-	const double scale = fmin((double) outputWidth / width, (double) outputHeight / height);
-	const int destWidth = (int) (width * scale);
-	const int destHeight = (int) (height * scale);
-	const SDL_Rect dest = {
-		.x = (outputWidth - destWidth) / 2,
-		.y = (outputHeight - destHeight) / 2,
-		.w = destWidth,
-		.h = destHeight,
-	};
 
 	SDL_RenderClear(renderer);
-	SDL_RenderCopy(renderer, texture, NULL, &dest);
+
+	if (bezel && bezel->valid && layout == LAYOUT_HORIZONTAL) {
+		// Fit the whole bezel canvas into the window, then place each half of the
+		// composited GBA frame into that bezel's own transparent screen cutouts,
+		// scaled by the same factor so both screens stay aligned with the artwork
+		// regardless of the actual window/display resolution.
+		const double scale = fmin((double) outputWidth / bezel->width, (double) outputHeight / bezel->height);
+		const int destWidth = (int) (bezel->width * scale);
+		const int destHeight = (int) (bezel->height * scale);
+		const SDL_Rect bezelDest = {
+			.x = (outputWidth - destWidth) / 2,
+			.y = (outputHeight - destHeight) / 2,
+			.w = destWidth,
+			.h = destHeight,
+		};
+
+		const SDL_Rect gameLeftSrc = { 0, 0, GBA_WIDTH, GBA_HEIGHT };
+		const SDL_Rect gameRightSrc = { GBA_WIDTH, 0, GBA_WIDTH, GBA_HEIGHT };
+		const SDL_Rect leftDest = {
+			.x = bezelDest.x + (int) (bezel->left.x * scale),
+			.y = bezelDest.y + (int) (bezel->left.y * scale),
+			.w = (int) (bezel->left.w * scale),
+			.h = (int) (bezel->left.h * scale),
+		};
+		const SDL_Rect rightDest = {
+			.x = bezelDest.x + (int) (bezel->right.x * scale),
+			.y = bezelDest.y + (int) (bezel->right.y * scale),
+			.w = (int) (bezel->right.w * scale),
+			.h = (int) (bezel->right.h * scale),
+		};
+
+		SDL_RenderCopy(renderer, texture, &gameLeftSrc, &leftDest);
+		SDL_RenderCopy(renderer, texture, &gameRightSrc, &rightDest);
+		SDL_RenderCopy(renderer, bezel->texture, NULL, &bezelDest);
+	} else {
+		// No bezel (or a vertical layout, not yet supported by the auto-cutout
+		// detection): preserve each player's native 4:3-per-screen aspect ratio,
+		// letterboxed/pillarboxed instead of stretching to fill the window.
+		const double scale = fmin((double) outputWidth / width, (double) outputHeight / height);
+		const int destWidth = (int) (width * scale);
+		const int destHeight = (int) (height * scale);
+		const SDL_Rect dest = {
+			.x = (outputWidth - destWidth) / 2,
+			.y = (outputHeight - destHeight) / 2,
+			.w = destWidth,
+			.h = destHeight,
+		};
+		SDL_RenderCopy(renderer, texture, NULL, &dest);
+	}
+
 	SDL_RenderPresent(renderer);
 	free(composite);
 }
@@ -465,7 +598,7 @@ static void stop_link_session(struct instance instances[2], struct GBASIOLockste
 // handful of fps. Snapshot each core independently instead, reusing the last
 // snapshot for whichever core isn't ready yet so neither side ever blocks the
 // other.
-static void render_linked(struct instance instances[2], enum layout layout, SDL_Renderer* renderer, SDL_Texture* texture) {
+static void render_linked(struct instance instances[2], enum layout layout, SDL_Renderer* renderer, SDL_Texture* texture, const struct bezel* bezel) {
 	static mColor snapshot0[GBA_WIDTH * GBA_HEIGHT];
 	static mColor snapshot1[GBA_WIDTH * GBA_HEIGHT];
 
@@ -481,7 +614,7 @@ static void render_linked(struct instance instances[2], enum layout layout, SDL_
 
 	struct instance snap0 = { .pixels = snapshot0 };
 	struct instance snap1 = { .pixels = snapshot1 };
-	render(&snap0, &snap1, layout, renderer, texture);
+	render(&snap0, &snap1, layout, renderer, texture, bezel);
 }
 
 // Safely mutate a running core's keys from the main thread, matching mgba's own
@@ -599,9 +732,14 @@ int main(int argc, char** argv) {
 	}
 	fprintf(stderr, "gba-dual: [trace] window/renderer/texture created (driver=%s)\n", SDL_GetCurrentVideoDriver());
 	fflush(stderr);
+	struct bezel bezel = {0};
+	if (options.bezel) {
+		load_bezel(renderer, options.bezel, &bezel);
+	}
 	struct GBASIOLockstepCoordinator coordinator;
 	if (options.link && !start_link_session(instances, &coordinator)) {
 		fprintf(stderr, "gba-dual: failed to start link-cable session\n");
+		destroy_bezel(&bezel);
 		SDL_DestroyTexture(texture);
 		SDL_DestroyRenderer(renderer);
 		SDL_DestroyWindow(window);
@@ -685,13 +823,13 @@ int main(int argc, char** argv) {
 			}
 		}
 		if (options.link) {
-			render_linked(instances, options.layout, renderer, texture);
+			render_linked(instances, options.layout, renderer, texture, &bezel);
 		} else {
 			instances[0].core->setKeys(instances[0].core, instances[0].keys);
 			instances[1].core->setKeys(instances[1].core, instances[1].keys);
 			instances[0].core->runFrame(instances[0].core);
 			instances[1].core->runFrame(instances[1].core);
-			render(&instances[0], &instances[1], options.layout, renderer, texture);
+			render(&instances[0], &instances[1], options.layout, renderer, texture, &bezel);
 		}
 		++frameCount;
 		if (frameCount == 1) {
@@ -710,6 +848,7 @@ int main(int argc, char** argv) {
 			SDL_GameControllerClose(controllers[i]);
 		}
 	}
+	destroy_bezel(&bezel);
 	SDL_DestroyTexture(texture);
 	SDL_DestroyRenderer(renderer);
 	SDL_DestroyWindow(window);

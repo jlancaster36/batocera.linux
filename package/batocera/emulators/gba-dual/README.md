@@ -7,11 +7,13 @@ as either a 480x160 horizontal layout or a 240x320 vertical layout.
 ## CLI
 
 ```text
-gba-dual --rom1 GAME.gba --rom2 GAME.gba --layout horizontal --link
+gba-dual --rom1 GAME.gba --rom2 GAME.gba --layout horizontal --link [--bezel PATH]
 ```
 
 The Batocera integration launches it through `batocera-gba2p`, which reads the
-`gba_dual_layout` and `gba_dual_link` system options.
+`gba_dual_layout` and `gba_dual_link` system options, plus resolves and passes
+`--bezel` when a decoration set is selected for the `gba2players` system (see
+"Custom bezel support" below).
 
 ## Current implementation status
 
@@ -32,6 +34,22 @@ The Batocera integration launches it through `batocera-gba2p`, which reads the
 - Audio from both instances is mixed and sent to a single SDL audio device
   (per-instance `mAudioResampler`, summed and clamped to 16-bit). Works for
   both `--link` and `--no-link`.
+- Custom bezel support (horizontal layout only): `gba-dual` composites its own
+  bezel artwork internally rather than relying on Batocera's external
+  `batocera-bezel-overlay` process, which isn't installed on every image and
+  whose cover-ratio validation assumes a 4:3 game area, incorrectly rejecting
+  a genuinely wide dual-screen layout. `GbaDualGenerator.supportsInternalBezels()`
+  returns `True` to skip that path entirely; the generator resolves the active
+  decoration set via the same `bezelsUtil.getBezelInfos()` Batocera itself
+  uses, and passes the PNG path via `--bezel`. `load_bezel()` in `main.c` loads
+  the image with mGBA's own `mImageLoad`, then auto-detects each player's
+  "screen window" by scanning the alpha channel for the transparent bounding
+  box on each side of the image's horizontal midpoint - no separate `.info`/
+  `.lay` metadata file is required, the cutouts are inferred directly from the
+  artwork. `render()` draws the composited GBA frame into those two cutouts
+  (scaled to the window/output size), then draws the bezel texture on top with
+  alpha blending. Vertical layout bezels aren't supported yet and fall back to
+  the plain letterboxed rendering.
 - Controller input: each player's SDL_GameController buttons are opened via
   `--controller1`/`--controller2` (SDL joystick indices, supplied by
   `gbaDualGenerator.py` from Batocera's real per-player controller pairing).
@@ -156,6 +174,37 @@ idempotent (checks before patching each file) and restarts EmulationStation
 itself at the end, since `S99userservices` runs after `S31emulationstation`
 has already started. This is a live-testing convenience only, not part of
 the real package - a proper image build makes it unnecessary.
+
+## TODOs
+
+### Per-player save data and save states
+
+- Add independent save storage for each player in the two-player mode.
+- Default behavior should be: player 1 and player 2 each get their own save
+  file, RTC state, and save-state storage so games like Pokémon Emerald can
+  continue from different progress on the same ROM without overwriting one
+  another.
+- Recommended layout in `/userdata`:
+  - `/userdata/saves/gba2players/<game-id>/player1/`
+  - `/userdata/saves/gba2players/<game-id>/player2/`
+  - optional `/userdata/saves/gba2players/<game-id>/shared/` only for
+    explicitly link-shared games.
+- Keep the single-player `gba` system's existing save behavior unchanged.
+
+### Vertical layout bezel support
+
+- `load_bezel()` currently only auto-detects screen cutouts by splitting the
+  artwork at its horizontal midpoint, so bezels are only composited when
+  `gba_dual_layout` is `horizontal`. A vertical-layout bezel would need the
+  same detection split top/bottom instead, plus test artwork to verify against.
+
+### Per-game bezel overrides
+
+- Batocera's decoration convention supports per-ROM bezel overrides (see
+  `bezelsUtil.getBezelInfos()`'s game/system/default lookup order) and
+  `GbaDualGenerator.generate()` already resolves through that same lookup, so
+  a `games/<romname>.png` in the active decoration pack should already work -
+  this just hasn't been tested against a real per-game override yet.
 
 ## Known issues
 
