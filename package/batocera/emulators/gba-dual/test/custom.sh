@@ -83,5 +83,50 @@ with open(path, "w") as f:
     f.write(content)
 print("es_systems.cfg patched OK")
 PY
-    /etc/init.d/S31emulationstation restart
+fi
+
+# es_features.cfg entry (idempotent)
+FEATURES=/usr/share/emulationstation/es_features.cfg
+if [ -f "$FEATURES" ] && ! grep -q 'name="gba-dual"' "$FEATURES"; then
+    python3 - <<'PY'
+feat_path = "/usr/share/emulationstation/es_features.cfg"
+with open(feat_path, "r") as f:
+    f_content = f.read()
+
+if 'name="gba-dual"' not in f_content:
+    closing_tag = "</features>"
+    c_idx = f_content.rfind(closing_tag)
+    features_block = """  <emulator name="gba-dual" features="padtokeyboard">
+    <systems>
+      <system name="gba2players" features="padtokeyboard" >
+        <sharedFeature value="powermode" />
+        <sharedFeature value="tdp" />
+        <sharedFeature value="videomode" />
+        <sharedFeature value="bezel" />
+        <feature name="SPLIT LAYOUT" value="gba_dual_layout" description="Arrange the two GBA screens horizontally or vertically.">
+          <choice name="Horizontal (Default)" value="horizontal" />
+          <choice name="Vertical" value="vertical" />
+        </feature>
+        <feature name="LINK CABLE" value="gba_dual_link" description="Enable the mGBA GBA multiplayer link backend.">
+          <choice name="Enabled (Default)" value="true" />
+          <choice name="Disabled" value="false" />
+        </feature>
+        <feature name="2P AUDIO PANNING" value="gba_dual_audio_pan" description="Spatial stereo audio separation for 2-player split screen.">
+          <choice name="Stereo Blend (Default)" value="blend" />
+          <choice name="Hard Split (L/R)" value="split" />
+          <choice name="Centered (Equal)" value="center" />
+        </feature>
+      </system>
+    </systems>
+  </emulator>
+"""
+    f_content = f_content[:c_idx] + features_block + f_content[c_idx:]
+    with open(feat_path, "w") as f:
+        f.write(f_content)
+    print("es_features.cfg patched OK")
+PY
+fi
+
+if [ -x /etc/init.d/S31emulationstation ]; then
+    /etc/init.d/S31emulationstation restart || true
 fi
