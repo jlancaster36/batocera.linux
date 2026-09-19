@@ -17,6 +17,7 @@
 #include <mgba-util/audio-buffer.h>
 #include <mgba-util/audio-resampler.h>
 #include <mgba-util/vfs.h>
+#include <mgba/core/directories.h>
 
 #define GBA_WIDTH 240
 #define GBA_HEIGHT 160
@@ -25,6 +26,12 @@
 enum layout {
 	LAYOUT_HORIZONTAL,
 	LAYOUT_VERTICAL
+};
+
+enum audio_pan {
+	AUDIO_PAN_BLEND,
+	AUDIO_PAN_SPLIT,
+	AUDIO_PAN_CENTER
 };
 
 struct instance {
@@ -55,6 +62,9 @@ struct options {
 	// bezel lookup convention (configgen's bezelsUtil.getBezelInfos) and
 	// passed in by gbaDualGenerator.py. NULL means no bezel selected.
 	const char* bezel;
+	const char* saveDir1;
+	const char* saveDir2;
+	enum audio_pan audioPan;
 };
 
 // A loaded bezel: the full-canvas artwork texture plus the two "screen window"
@@ -73,7 +83,8 @@ struct bezel {
 
 static void usage(const char* program) {
 	fprintf(stderr, "Usage: %s --rom1 ROM --rom2 ROM [--layout horizontal|vertical] [--link|--no-link] "
-	                "[--frames N --screenshot PATH] [--controller1 INDEX] [--controller2 INDEX] [--bezel PATH]\n", program);
+	                "[--frames N --screenshot PATH] [--controller1 INDEX] [--controller2 INDEX] [--bezel PATH] "
+	                "[--save-dir1 PATH] [--save-dir2 PATH] [--audio-pan blend|split|center]\n", program);
 }
 
 // mGBA's default logger dumps every BIOS call and DMA transfer to stdout;
@@ -103,6 +114,7 @@ struct audio_mixer {
 	struct audio_source sources[2];
 	SDL_AudioDeviceID device;
 	int sampleRate;
+	enum audio_pan audioPan;
 };
 
 static void audio_callback(void* userdata, Uint8* stream, int len) {
@@ -133,16 +145,45 @@ static void audio_callback(void* userdata, Uint8* stream, int len) {
 		int16_t mixed[AUDIO_MIX_FRAMES * 2];
 		const int available = mAudioBufferRead(&source->buffer, mixed, frames);
 		for (int f = 0; f < available; ++f) {
-			for (int c = 0; c < 2; ++c) {
-				const int32_t sum = out[f * 2 + c] + mixed[f * 2 + c];
-				out[f * 2 + c] = (int16_t) (sum > INT16_MAX ? INT16_MAX : (sum < INT16_MIN ? INT16_MIN : sum));
+			const int32_t inL = mixed[f * 2 + 0];
+			const int32_t inR = mixed[f * 2 + 1];
+			int32_t addL = 0;
+			int32_t addR = 0;
+
+			if (mixer->audioPan == AUDIO_PAN_SPLIT) {
+				// Hard split: P1 entirely Left, P2 entirely Right
+				const int32_t mono = (inL + inR) / 2;
+				if (i == 0) {
+					addL = mono;
+				} else {
+					addR = mono;
+				}
+			} else if (mixer->audioPan == AUDIO_PAN_BLEND) {
+				// Spatial blend (75/25): P1 biased Left, P2 biased Right
+				if (i == 0) {
+					addL = (inL * 3 + inR * 1) / 4;
+					addR = (inR * 1) / 4;
+				} else {
+					addL = (inL * 1) / 4;
+					addR = (inR * 3 + inL * 1) / 4;
+				}
+			} else {
+				// Centered: normal mix
+				addL = inL;
+				addR = inR;
 			}
+
+			const int32_t sumL = out[f * 2 + 0] + addL;
+			const int32_t sumR = out[f * 2 + 1] + addR;
+			out[f * 2 + 0] = (int16_t) (sumL > INT16_MAX ? INT16_MAX : (sumL < INT16_MIN ? INT16_MIN : sumL));
+			out[f * 2 + 1] = (int16_t) (sumR > INT16_MAX ? INT16_MAX : (sumR < INT16_MIN ? INT16_MIN : sumR));
 		}
 	}
 }
 
-static bool start_audio(struct audio_mixer* mixer, struct instance* instances) {
+static bool start_audio(struct audio_mixer* mixer, struct instance* instances, enum audio_pan audioPan) {
 	mixer->instances = instances;
+	mixer->audioPan = audioPan;
 	SDL_AudioSpec desired = {0};
 	desired.freq = 44100;
 	desired.format = AUDIO_S16SYS;
@@ -181,6 +222,7 @@ static bool parse_options(int argc, char** argv, struct options* options) {
 	options->link = true;
 	options->controller1 = -1;
 	options->controller2 = -1;
+	options->audioPan = AUDIO_PAN_BLEND;
 	for (int i = 1; i < argc; ++i) {
 		if (!strcmp(argv[i], "--rom1") && i + 1 < argc) {
 			options->rom1 = argv[++i];
@@ -207,6 +249,19 @@ static bool parse_options(int argc, char** argv, struct options* options) {
 			options->controller2 = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--bezel") && i + 1 < argc) {
 			options->bezel = argv[++i];
+		} else if (!strcmp(argv[i], "--save-dir1") && i + 1 < argc) {
+			options->saveDir1 = argv[++i];
+		} else if (!strcmp(argv[i], "--save-dir2") && i + 1 < argc) {
+			options->saveDir2 = argv[++i];
+		} else if (!strcmp(argv[i], "--audio-pan") && i + 1 < argc) {
+			const char* val = argv[++i];
+			if (!strcmp(val, "split")) {
+				options->audioPan = AUDIO_PAN_SPLIT;
+			} else if (!strcmp(val, "center")) {
+				options->audioPan = AUDIO_PAN_CENTER;
+			} else {
+				options->audioPan = AUDIO_PAN_BLEND;
+			}
 		} else {
 			return false;
 		}
@@ -289,7 +344,7 @@ static void destroy_bezel(struct bezel* bezel) {
 	bezel->valid = false;
 }
 
-static bool load_instance(struct instance* instance, const char* path) {
+static bool load_instance(struct instance* instance, const char* path, const char* saveDir) {
 	instance->core = mCoreFind(path);
 	if (!instance->core || !instance->core->init(instance->core)) {
 		return false;
@@ -308,6 +363,25 @@ static bool load_instance(struct instance* instance, const char* path) {
 		instance->core->deinit(instance->core);
 		return false;
 	}
+#if defined(ENABLE_VFS) && defined(ENABLE_DIRECTORIES)
+	if (saveDir) {
+		struct VDir* sdir = VDirOpen(saveDir);
+		if (sdir) {
+			if (instance->core->dirs.save && instance->core->dirs.save != instance->core->dirs.base) {
+				instance->core->dirs.save->close(instance->core->dirs.save);
+			}
+			instance->core->dirs.save = sdir;
+		}
+		struct VDir* stdir = VDirOpen(saveDir);
+		if (stdir) {
+			if (instance->core->dirs.state && instance->core->dirs.state != instance->core->dirs.base) {
+				instance->core->dirs.state->close(instance->core->dirs.state);
+			}
+			instance->core->dirs.state = stdir;
+		}
+	}
+	mCoreAutoloadSave(instance->core);
+#endif
 	instance->pixels = calloc(GBA_WIDTH * GBA_HEIGHT, sizeof(*instance->pixels));
 	if (!instance->pixels) {
 		instance->core->deinit(instance->core);
@@ -550,9 +624,12 @@ static int run_headless(struct instance* instances, const struct options* option
 static bool start_link_session(struct instance instances[2], struct GBASIOLockstepCoordinator* coordinator) {
 	GBASIOLockstepCoordinatorInit(coordinator);
 	for (int i = 0; i < 2; ++i) {
-		// mCoreThreadStart() snapshots core->opts into the thread's sync object,
-		// so videoSync/audioSync must be forced on before starting, not after.
-		instances[i].core->opts.videoSync = true;
+		// Core 0 (primary/master) controls master timing and synchronizes to VSync (videoSync).
+		// Core 1 (secondary) is slaved to Core 0 cycle-by-cycle via the SIO lockstep coordinator.
+		// If videoSync is enabled on Core 1 as well, Core 1 waits on frame presentation
+		// barriers independently of the lockstep driver, causing cycle starvation, frame drops
+		// to ~18fps, and link drift.
+		instances[i].core->opts.videoSync = (i == 0);
 		instances[i].core->opts.audioSync = true;
 		instances[i].thread.core = instances[i].core;
 		// Each core thread installs its own per-thread logger that bypasses the
@@ -637,7 +714,8 @@ int main(int argc, char** argv) {
 		usage(argv[0]);
 		return EXIT_FAILURE;
 	}
-	if (!load_instance(&instances[0], options.rom1) || !load_instance(&instances[1], options.rom2)) {
+	if (!load_instance(&instances[0], options.rom1, options.saveDir1) ||
+	    !load_instance(&instances[1], options.rom2, options.saveDir2)) {
 		fprintf(stderr, "gba-dual: unable to load ROMs\n");
 		destroy_instance(&instances[0]);
 		destroy_instance(&instances[1]);
@@ -749,7 +827,7 @@ int main(int argc, char** argv) {
 		return EXIT_FAILURE;
 	}
 	struct audio_mixer mixer = {0};
-	const bool audioStarted = start_audio(&mixer, instances);
+	const bool audioStarted = start_audio(&mixer, instances, options.audioPan);
 	if (!audioStarted) {
 		fprintf(stderr, "gba-dual: continuing without audio\n");
 	}

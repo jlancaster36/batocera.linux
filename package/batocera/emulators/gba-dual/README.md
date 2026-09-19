@@ -7,13 +7,14 @@ as either a 480x160 horizontal layout or a 240x320 vertical layout.
 ## CLI
 
 ```text
-gba-dual --rom1 GAME.gba --rom2 GAME.gba --layout horizontal --link [--bezel PATH]
+gba-dual --rom1 GAME.gba --rom2 GAME.gba --layout horizontal --link [--bezel PATH] [--save-dir1 PATH] [--save-dir2 PATH] [--audio-pan blend|split|center]
 ```
 
 The Batocera integration launches it through `batocera-gba2p`, which reads the
 `gba_dual_layout` and `gba_dual_link` system options, plus resolves and passes
 `--bezel` when a decoration set is selected for the `gba2players` system (see
-"Custom bezel support" below).
+"Custom bezel support" below), independent save paths for Player 1 and Player 2,
+and the selected `gba_dual_audio_pan` stereo spatialization mode.
 
 ## Current implementation status
 
@@ -33,7 +34,20 @@ The Batocera integration launches it through `batocera-gba2p`, which reads the
   the simpler single-thread synchronous loop (no real link timing).
 - Audio from both instances is mixed and sent to a single SDL audio device
   (per-instance `mAudioResampler`, summed and clamped to 16-bit). Works for
-  both `--link` and `--no-link`.
+  both `--link` and `--no-link`. Includes stereo spatialization (`--audio-pan`):
+  - `blend` (default): 75% Left / 25% Right for Player 1, 25% Left / 75% Right
+    for Player 2. Provides clear spatial separation while avoiding single-ear
+    fatigue on headphones.
+  - `split`: Hard 100% Left for Player 1, 100% Right for Player 2.
+  - `center`: Centered 50/50 stereo mix across both channels.
+- Independent per-player save storage: Player 1 and Player 2 each receive their
+  own isolated save directory (`--save-dir1` / `--save-dir2`), resolved by
+  `gbaDualGenerator.py` to:
+  - `/userdata/saves/gba2players/<rom_stem>/player1/`
+  - `/userdata/saves/gba2players/<rom_stem>/player2/`
+  Battery backup saves (`.sav`) and save states are autoloaded and stored
+  independently for each player, keeping campaigns completely separate while
+  leaving single-player `/userdata/saves/gba/` untouched.
 - Custom bezel support (horizontal layout only): `gba-dual` composites its own
   bezel artwork internally rather than relying on Batocera's external
   `batocera-bezel-overlay` process, which isn't installed on every image and
@@ -176,20 +190,6 @@ has already started. This is a live-testing convenience only, not part of
 the real package - a proper image build makes it unnecessary.
 
 ## TODOs
-
-### Per-player save data and save states
-
-- Add independent save storage for each player in the two-player mode.
-- Default behavior should be: player 1 and player 2 each get their own save
-  file, RTC state, and save-state storage so games like Pokémon Emerald can
-  continue from different progress on the same ROM without overwriting one
-  another.
-- Recommended layout in `/userdata`:
-  - `/userdata/saves/gba2players/<game-id>/player1/`
-  - `/userdata/saves/gba2players/<game-id>/player2/`
-  - optional `/userdata/saves/gba2players/<game-id>/shared/` only for
-    explicitly link-shared games.
-- Keep the single-player `gba` system's existing save behavior unchanged.
 
 ### Vertical layout bezel support
 
