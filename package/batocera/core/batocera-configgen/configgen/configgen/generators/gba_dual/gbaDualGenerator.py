@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ... import Command
+from ...batoceraPaths import SAVES, mkdir_if_not_exists
 from ...controller import Controller, generate_sdl_game_controller_config
 from ...utils import bezels as bezelsUtil
 from ..Generator import Generator
@@ -47,6 +48,21 @@ class GbaDualGenerator(Generator):
             bz_infos = bezelsUtil.getBezelInfos(rom, bezel, system.name, system.config.emulator)
             if bz_infos is not None and bz_infos["png"].exists():
                 commandArray += ["--bezel", str(bz_infos["png"])]
+
+        # Independent save directories per player:
+        # /userdata/saves/gba2players/<rom_stem>/player1/ and player2/
+        # Guarantees full isolation from single-player gba saves.
+        rom_stem = rom.stem
+        p1_save_dir = SAVES / "gba2players" / rom_stem / "player1"
+        p2_save_dir = SAVES / "gba2players" / rom_stem / "player2"
+        mkdir_if_not_exists(p1_save_dir)
+        mkdir_if_not_exists(p2_save_dir)
+        commandArray += ["--save-dir1", str(p1_save_dir)]
+        commandArray += ["--save-dir2", str(p2_save_dir)]
+
+        # Spatial audio panning mode
+        audio_pan = system.config.get("gba_dual_audio_pan", "blend")
+        commandArray += ["--audio-pan", audio_pan]
 
         return Command.Command(
             array=commandArray,

@@ -18,5 +18,12 @@ custom_features:
     choices:
       Enabled (Default): "true"
       Disabled: "false"
+  gba_dual_audio_pan:
+    prompt: 2P AUDIO PANNING
+    description: Spatial stereo audio separation for 2-player split screen.
+    choices:
+      Stereo Blend (Default): "blend"
+      Hard Split (L/R): "split"
+      Centered (Equal): "center"
 systems:
   - gba2players
