@@ -1,0 +1,27 @@
+--- a/src/citra_qt/bootmanager.cpp
++++ b/src/citra_qt/bootmanager.cpp
+@@ -190,6 +190,9 @@ public:
+             context = CreateQOpenGLContext(!Settings::values.use_gles.GetValue());
+             if (context == nullptr) {
+                 LOG_ERROR(Frontend, "Unable to create any OpenGL context.");
++                // Fallback to a dummy default format context so context is never null
++                context = std::make_unique<QOpenGLContext>();
++                context->create();
+             }
+         }
+ 
+--- a/src/citra_qt/citra_qt.cpp
++++ b/src/citra_qt/citra_qt.cpp
+@@ -4401,8 +4401,10 @@ int main(int argc, char* argv[]) {
+ #endif
+ 
+ #ifdef ENABLE_OPENGL
+-    QCoreApplication::setAttribute(Qt::AA_DontCheckOpenGLContextThreadAffinity);
+-    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
++    if (Settings::values.graphics_api.GetValue() == Settings::GraphicsAPI::OpenGL) {
++        QCoreApplication::setAttribute(Qt::AA_DontCheckOpenGLContextThreadAffinity);
++        QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
++    }
+ #endif
+ 
+     QApplication app(argc, argv);
