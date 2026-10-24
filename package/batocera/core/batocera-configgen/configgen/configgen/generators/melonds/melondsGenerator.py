@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any, Final
 
 import toml
@@ -230,22 +231,22 @@ class MelonDSGenerator(Generator):
         val = -1
         # Only use Player 1 controls
         if pad := Controller.find_player_number(playersControllers, 1):
+            joystick_id = pad.index
+            if pad.device_path and (m := re.search(r"/js(\d+)$", pad.device_path)) is not None:
+                joystick_id = int(m.group(1))
+            base_config["Instance0"]["JoystickID"] = joystick_id
             for index in pad.inputs:
                 input = pad.inputs[index]
                 if input.name not in melonDSMapping:
                     continue
                 option = melonDSMapping[input.name]
-                # Workaround - SDL numbers?
-                val = input.id
-                if val == "0":
-                    if option == "Up":
-                        val = 257
-                    elif option == "Down":
-                        val = 260
-                    elif option == "Left":
-                        val = 264
-                    elif option == "Right":
-                        val = 258
+                if input.type == "hat":
+                    val = 0x100 | (int(input.id) << 4) | int(input.value)
+                elif input.type == "axis":
+                    axisdir = 0 if int(input.value) > 0 else 1
+                    val = 0x1FFFF | (axisdir << 20) | (int(input.id) << 24)
+                else:
+                    val = int(input.id)
                 base_config["Instance0"]["Joystick"][option] = int(val)
 
         # Update base_config with any existing values
