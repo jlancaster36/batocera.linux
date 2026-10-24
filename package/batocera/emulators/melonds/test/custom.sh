@@ -27,8 +27,18 @@ fi
 
 # Default emulator/core (idempotent)
 DEFAULTS=/usr/share/batocera/configgen/configgen-defaults.yml
-if [ -f "$DEFAULTS" ] && ! grep -q "^nds:" "$DEFAULTS"; then
-    sed -i '/^nes:/i nds:\n  emulator: melonds\n  core:     melonds' "$DEFAULTS"
+if [ -f "$DEFAULTS" ] && ! grep -A1 "^nds:" "$DEFAULTS" | grep -q "emulator: melonds"; then
+    if grep -q "^nds:" "$DEFAULTS"; then
+        python3 - "$DEFAULTS" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+s = re.sub(r"^nds:\n  emulator: \S+\n  core:\s*\S+", "nds:\n  emulator: melonds\n  core:     melonds", s, flags=re.M)
+open(p, "w").write(s)
+PY
+    else
+        sed -i '/^nes:/i nds:\n  emulator: melonds\n  core:     melonds' "$DEFAULTS"
+    fi
 fi
 
 # Dual-screen-display feature entry (idempotent) - /usr is an ephemeral
@@ -39,21 +49,30 @@ if [ -f "$FEATURES" ] && ! grep -q "melonds_dual_screen_mode" "$FEATURES"; then
     <feature name="DUAL SCREEN DISPLAY" value="melonds_dual_screen_mode" description="Keep both DS screens on the main display or move the bottom screen to the secondary display.">\
       <choice name="Main display (both screens)" value="main"/>\
       <choice name="Secondary display (bottom screen)" value="secondary"/>\
+    </feature>\
+    <feature name="DUAL SCREEN LAYOUT" value="melonds_dual_screen_layout" description="Select how the two DS screens are laid out when dual-screen mode is enabled.">\
+      <choice name="Original screen positions" value="0"/>\
+      <choice name="Vertical stack" value="1"/>\
+      <choice name="Horizontal split" value="2"/>\
+      <choice name="Hybrid" value="3"/>\
     </feature>' "$FEATURES"
 fi
 
-# Map the WaveShare touchscreen to the secondary output (DP-1) with a matrix
-# empirically calibrated against its real reported ABS range (0-4096, per
-# `evtest`), not the geometric map-to-output approximation - that guess was
-# off enough to be visibly offset in-game. Note: the X input device named
-# "DP-1" is NOT this touchscreen - it's an unrelated CEC remote control input
-# that happens to share the output's name.
+# Ensure dual MST display layout is established if MST outputs DP-3 and DP-4 are active
+if command -v xrandr >/dev/null 2>&1; then
+    DISPLAY=:0 xrandr --output DP-3 --primary --mode 1920x1080 --pos 0x0 --output DP-4 --mode 1920x1080 --pos 1920x0 2>/dev/null || true
+fi
+
+# Map the touchscreen to the secondary output (DP-4 on MST / DP-1 on direct).
+# Dynamically resolves the touch device by name/identifier (UCTRONICS/QinHeng,
+# WaveShare, or QDtech) to guard against device ID shifts across reboots.
 if command -v xinput >/dev/null 2>&1; then
-    XORG_SOCKET=$(ls /tmp/.X11-unix/ 2>/dev/null | head -1)
-    XORG_DISPLAY=":${XORG_SOCKET#X}"
-    DISPLAY="$XORG_DISPLAY" XAUTHORITY=/var/lib/.Xauthority \
-        xinput set-prop "WaveShare WS170120" "Coordinate Transformation Matrix" \
-        0.374514 0 0.645615 0 0.563190 -0.002751 0 0 1 2>/dev/null || true
+    TARGET_OUT=$(DISPLAY=:0 xrandr 2>/dev/null | grep -E "^(DP-4|DP-1) connected" | awk '{print $1}' | head -n1)
+    TARGET_OUT=${TARGET_OUT:-DP-4}
+    TOUCH_ID=$(DISPLAY=:0 xinput list 2>/dev/null | grep -iE "USB2IIC|WaveShare|QDtech|MPI" | grep -o "id=[0-9]*" | cut -d= -f2 | head -n1)
+    if [ -n "$TOUCH_ID" ]; then
+        DISPLAY=:0 xinput map-to-output "$TOUCH_ID" "$TARGET_OUT" 2>/dev/null || true
+    fi
 fi
 
 # batocera-backglass permanently occupies the secondary display with its own
