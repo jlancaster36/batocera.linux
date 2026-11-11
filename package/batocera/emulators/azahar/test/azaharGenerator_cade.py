@@ -1,0 +1,334 @@
+from __future__ import annotations
+
+import logging
+from os import environ
+from typing import TYPE_CHECKING
+
+from ... import Command
+from ...batoceraPaths import CACHE, CONFIGS, SAVES, ensure_parents_and_open
+from ...controller import Controller, generate_sdl_game_controller_config
+from ...utils import vulkan
+from ...utils.configparser import CaseSensitiveRawConfigParser
+from ..Generator import Generator
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from ...controller import Controllers
+    from ...Emulator import Emulator
+    from ...input import InputMapping
+    from ...types import HotkeysContext
+
+
+_logger = logging.getLogger(__name__)
+
+class AzaharGenerator(Generator):
+
+    def getHotkeysContext(self) -> HotkeysContext:
+        return {
+            "name": "azahar",
+            "keys": { "exit": ["KEY_LEFTALT", "KEY_F4"], "menu": "KEY_F4", "reset": "KEY_F6", "screen_layout": "KEY_F10", "swap_screen": "KEY_F9" }
+        }
+
+    # Main entry of the module
+    def generate(self, system, rom, playersControllers, metadata, guns, wheels, gameResolution):
+        AzaharGenerator.writeAZAHARConfig(CONFIGS / "azaharplus-emu" / "qt-config.ini", system, playersControllers)
+
+        commandArray = ['/usr/bin/azahar', '-f', rom]
+
+        return Command.Command(array=commandArray, env={
+            "XDG_CONFIG_HOME": CONFIGS,
+            "XDG_DATA_HOME": SAVES / "3ds",
+            "XDG_CACHE_HOME": CACHE,
+            "XDG_RUNTIME_DIR": SAVES / "3ds" / "azaharplus-emu",
+            "SDL_GAMECONTROLLERCONFIG": generate_sdl_game_controller_config(playersControllers),
+            "SDL_JOYSTICK_HIDAPI": "0"
+            }
+        )
+
+    # Show mouse on screen
+    def getMouseMode(self, config, rom):
+        return config.get("azahar_screen_layout") != '1-false'
+
+    @staticmethod
+    def writeAZAHARConfig(
+        azaharConfigFile: Path,
+        system: Emulator,
+        playersControllers: Controllers
+    ) -> None:
+        # Pads
+        azaharButtons = {
+            "button_a":      "a",
+            "button_b":      "b",
+            "button_x":      "x",
+            "button_y":      "y",
+            "button_up":     "up",
+            "button_down":   "down",
+            "button_left":   "left",
+            "button_right":  "right",
+            "button_l":      "pageup",
+            "button_r":      "pagedown",
+            "button_start":  "start",
+            "button_select": "select",
+            "button_zl":     "l2",
+            "button_zr":     "r2",
+            "button_home":   "hotkey"
+        }
+
+        azaharAxis = {
+            "circle_pad":    "joystick1",
+            "c_stick":       "joystick2"
+        }
+
+        # ini file
+        azaharConfig = CaseSensitiveRawConfigParser(strict=False)
+        if azaharConfigFile.exists():
+            azaharConfig.read(azaharConfigFile)
+
+        ## [LAYOUT]
+        if not azaharConfig.has_section("Layout"):
+            azaharConfig.add_section("Layout")
+        # Screen Layout
+        azaharConfig.set("Layout", "custom_layout", "false")
+        azaharConfig.set("Layout", r"custom_layout\default", "false")
+        layout_option, swap_screen = system.config.get("azahar_screen_layout", "4-false").split('-')
+        azaharConfig.set("Layout", "swap_screen",   swap_screen)
+        azaharConfig.set("Layout", r"swap_screen\default", "false")
+        azaharConfig.set("Layout", "layout_option", layout_option)
+        azaharConfig.set("Layout", r"layout_option\default", "false")
+
+        ## [SYSTEM]
+        if not azaharConfig.has_section("System"):
+            azaharConfig.add_section("System")
+        # New 3DS Version
+        azaharConfig.set("System", "is_new_3ds", system.config.get_bool("azahar_is_new_3ds", return_values=("true", "false")))
+        azaharConfig.set("System", r"is_new_3ds\default", "false")
+        # Language
+        azaharConfig.set("System", "region_value", str(getAzaharLangFromEnvironment()))
+        azaharConfig.set("System", r"region_value\default", "false")
+
+        ## [UI]
+        if not azaharConfig.has_section("UI"):
+            azaharConfig.add_section("UI")
+        # Start Fullscreen
+        azaharConfig.set("UI", "fullscreen", "true")
+        azaharConfig.set("UI", r"fullscreen\default", "false")
+
+        # Batocera - Defaults
+        azaharConfig.set("UI", "displayTitleBars", "false")
+        azaharConfig.set("UI", r"displayTitleBars\default", "false")
+        azaharConfig.set("UI", "firstStart", "false")
+        azaharConfig.set("UI", r"firstStart\default", "false")
+        azaharConfig.set("UI", "hideInactiveMouse", "true")
+        azaharConfig.set("UI", r"hideInactiveMouse\default", "false")
+        azaharConfig.set("UI", "enable_discord_presence", "false")
+        azaharConfig.set("UI", r"enable_discord_presence\default", "false")
+
+        # Remove pop-up prompt on start
+        azaharConfig.set("UI", "calloutFlags", "1")
+        azaharConfig.set("UI", r"calloutFlags\default", "false")
+        # Close without confirmation
+        azaharConfig.set("UI", "confirmClose", "false")
+        azaharConfig.set("UI", r"confirmclose\default", "false")
+
+        # screenshots
+        azaharConfig.set("UI", r"Paths\screenshotPath", "/userdata/screenshots")
+        azaharConfig.set("UI", r"Paths\screenshotPath\default", "false")
+
+        # don't check updates
+        azaharConfig.set("UI", r"Updater\check_for_update_on_start", "false")
+        azaharConfig.set("UI", r"Updater\check_for_update_on_start\default", "false")
+
+        ## [RENDERER]
+        if not azaharConfig.has_section("Renderer"):
+            azaharConfig.add_section("Renderer")
+        # Use Hardware rendering with Hardware Shader by default; give user choice to disable it for some games
+        azaharConfig.set("Renderer", "use_hw_renderer", "true")
+        azaharConfig.set("Renderer", r"use_hw_renderer\default", "false")
+        azaharConfig.set("Renderer", "use_hw_shader", system.config.get_bool("azahar_use_hw_shader", True, return_values=("true", "false")))
+        azaharConfig.set("Renderer", r"use_hw_shader\default", "false")
+        azaharConfig.set("Renderer", "use_shader_jit",  "true")
+        azaharConfig.set("Renderer", r"use_hw_shader_jit\default", "false")
+        # Software, OpenGL (default) or Vulkan - Default to Vulkan (2) on ARM / RK3588 targets
+        azaharConfig.set("Renderer", "graphics_api", system.config.get("azahar_graphics_api", "2"))
+        azaharConfig.set("Renderer", r"graphics_api\default", "false")
+        # Set Vulkan as necessary
+        if system.config.get("azahar_graphics_api", "2") == "2" and vulkan.is_available():
+            _logger.debug("Vulkan driver is available on the system.")
+            if vulkan.has_discrete_gpu():
+                _logger.debug("A discrete GPU is available on the system. We will use that for performance")
+                discrete_index = vulkan.get_discrete_gpu_index()
+                if discrete_index:
+                    _logger.debug("Using Discrete GPU Index: %s for Azahar", discrete_index)
+                    azaharConfig.set("Renderer", "physical_device", discrete_index)
+                    azaharConfig.set("Renderer", r"physical_device\default", "false")
+                else:
+                    _logger.debug("Couldn't get discrete GPU index")
+            else:
+                _logger.debug("Discrete GPU is not available on the system. Using default.")
+        # Use VSYNC
+        azaharConfig.set("Renderer", "use_vsync_new", system.config.get_bool("azahar_use_vsync_new", True, return_values=("true", "false")))
+        azaharConfig.set("Renderer", r"use_vsync_new\default", "false")
+        # Resolution Factor
+        azaharConfig.set("Renderer", "resolution_factor", system.config.get("azahar_resolution_factor", "1"))
+        azaharConfig.set("Renderer", r"resolution_factor\default", "false")
+        # Async Shader Compilation
+        azaharConfig.set("Renderer", "async_shader_compilation", system.config.get_bool("azahar_async_shader_compilation", return_values=("true", "false")))
+        azaharConfig.set("Renderer", r"async_shader_compilation\default", "false")
+        # Async Presentation - disable by default on PanVK / Mali to prevent dual-window buffer accumulation
+        azaharConfig.set("Renderer", "async_presentation", system.config.get_bool("azahar_async_presentation", False, return_values=("true", "false")))
+        azaharConfig.set("Renderer", r"async_presentation\default", "false")
+        # Use Frame Limit
+        azaharConfig.set("Renderer", "use_frame_limit", system.config.get_bool("azahar_use_frame_limit", True, return_values=("true", "false")))
+        azaharConfig.set("Renderer", r"use_frame_limit\default", "false")
+
+        ## [WEB SERVICE]
+        if not azaharConfig.has_section("WebService"):
+            azaharConfig.add_section("WebService")
+        azaharConfig.set("WebService", "enable_telemetry",  "false")
+        azaharConfig.set("WebService", r"enable_telemetry\default", "false")
+
+        ## [UTILITY]
+        if not azaharConfig.has_section("Utility"):
+            azaharConfig.add_section("Utility")
+        # Disk Shader Cache
+        azaharConfig.set("Utility", "use_disk_shader_cache", system.config.get_bool("azahar_use_disk_shader_cache", return_values=("true", "false")))
+        azaharConfig.set("Utility", r"use_disk_shader_cache\default", "false")
+        # Custom Textures
+        match system.config.get('azahar_custom_textures'):
+            case '0' | None | system.config.MISSING:
+                azaharConfig.set("Utility", "custom_textures",  "false")
+                azaharConfig.set("Utility", r"custom_textures\default", "false")
+                azaharConfig.set("Utility", "preload_textures", "false")
+                azaharConfig.set("Utility", r"preload_textures\default", "false")
+            case _ as textures:
+                tab = textures.split('-')
+                azaharConfig.set("Utility", "custom_textures",  "true")
+                azaharConfig.set("Utility", r"custom_textures\default", "false")
+                if tab[1] == 'normal':
+                    azaharConfig.set("Utility", "async_custom_loading", "true")
+                    azaharConfig.set("Utility", r"async_custom_loading\default", "false")
+                    azaharConfig.set("Utility", "preload_textures", "false")
+                    azaharConfig.set("Utility", r"preload_textures\default", "false")
+                else:
+                    azaharConfig.set("Utility", "async_custom_loading", "false")
+                    azaharConfig.set("Utility", r"async_custom_loading\default", "false")
+                    azaharConfig.set("Utility", "preload_textures", "true")
+                    azaharConfig.set("Utility", r"preload_textures\default", "false")
+
+        ## [CONTROLS]
+        if not azaharConfig.has_section("Controls"):
+            azaharConfig.add_section("Controls")
+
+        # Options required to load the functions when the configuration file is created
+        if not azaharConfig.has_option("Controls", r"profiles\size"):
+            azaharConfig.set("Controls", "profile", "0")
+            azaharConfig.set("Controls", r"profile\default", "false")
+            azaharConfig.set("Controls", r"profiles\1\name", "default")
+            azaharConfig.set("Controls", r"profiles\1\name\default", "false")
+            azaharConfig.set("Controls", r"profiles\size", "1")
+            azaharConfig.set("Controls", r"profiles\size\default", "false")
+
+        if controller := Controller.find_player_number(playersControllers, 1):
+            for x in azaharButtons:
+                btn_val = AzaharGenerator.setButton(azaharButtons[x], controller.guid, controller.inputs)
+                if btn_val:
+                    azaharConfig.set("Controls", f"profiles\\1\\{x}", f'"{btn_val}"')
+                    azaharConfig.set("Controls", f"profiles\\1\\{x}\\default", "false")
+            for x in azaharAxis:
+                axis_val = AzaharGenerator.setAxis(azaharAxis[x], controller.guid, controller.inputs)
+                if axis_val:
+                    azaharConfig.set("Controls", f"profiles\\1\\{x}", f'"{axis_val}"')
+                    azaharConfig.set("Controls", f"profiles\\1\\{x}\\default", "false")
+
+        ## Update the configuration file
+        with ensure_parents_and_open(azaharConfigFile, 'w') as configfile:
+            azaharConfig.write(configfile)
+
+    @staticmethod
+    def _escapeParam(s: str) -> str:
+        return s.replace("$", "$2").replace(":", "$0").replace(",", "$1")
+
+    @staticmethod
+    def setButton(key: str, padGuid: str, padInputs: InputMapping) -> str | None:
+        if key in padInputs:
+            input = padInputs[key]
+
+            if input.type == "button":
+                return f"button:{input.id},guid:{padGuid},engine:sdl"
+            if input.type == "hat":
+                return f"engine:sdl,guid:{padGuid},hat:{input.id},direction:{AzaharGenerator.hatdirectionvalue(input.value)}"
+            if input.type == "axis":
+                direction = "+" if int(input.value) >= 0 else "-"
+                threshold = "0.5" if direction == "+" else "-0.5"
+                return f"engine:sdl,guid:{padGuid},axis:{input.id},direction:{direction},threshold:{threshold}"
+        return None
+
+    @staticmethod
+    def setAxis(key: str, padGuid: str, padInputs: InputMapping) -> str:
+        inputx = None
+        inputy = None
+
+        if key == "joystick1" and "joystick1left" in padInputs:
+            inputx = padInputs["joystick1left"]
+        elif key == "joystick2" and "joystick2left" in padInputs:
+            inputx = padInputs["joystick2left"]
+
+        if key == "joystick1" and "joystick1up" in padInputs:
+            inputy = padInputs["joystick1up"]
+        elif key == "joystick2" and "joystick2up" in padInputs:
+            inputy = padInputs["joystick2up"]
+
+        if inputx is not None and inputy is not None:
+            return f"axis_x:{inputx.id},guid:{padGuid},axis_y:{inputy.id},engine:sdl"
+
+        # Fallback for arcade sticks / controllers without analog sticks:
+        # Map circle_pad using Azahar's analog_from_button engine from physical D-pad/axes
+        if key == "joystick1":
+            btn_up = AzaharGenerator.setButton("up", padGuid, padInputs)
+            btn_down = AzaharGenerator.setButton("down", padGuid, padInputs)
+            btn_left = AzaharGenerator.setButton("left", padGuid, padInputs)
+            btn_right = AzaharGenerator.setButton("right", padGuid, padInputs)
+            if btn_up and btn_down and btn_left and btn_right:
+                esc_up = AzaharGenerator._escapeParam(btn_up)
+                esc_down = AzaharGenerator._escapeParam(btn_down)
+                esc_left = AzaharGenerator._escapeParam(btn_left)
+                esc_right = AzaharGenerator._escapeParam(btn_right)
+                return f"engine:analog_from_button,up:{esc_up},down:{esc_down},left:{esc_left},right:{esc_right},modifier_scale:0.500000"
+
+        return ""
+
+    @staticmethod
+    def hatdirectionvalue(value: str) -> str:
+        if int(value) == 1:
+            return "up"
+        if int(value) == 4:
+            return "down"
+        if int(value) == 2:
+            return "right"
+        if int(value) == 8:
+            return "left"
+        return "unknown"
+
+# Language auto setting
+def getAzaharLangFromEnvironment():
+    region = { "AUTO": -1, "JPN": 0, "USA": 1, "EUR": 2, "AUS": 3, "CHN": 4, "KOR": 5, "TWN": 6 }
+    availableLanguages = {
+        "ja_JP": "JPN",
+        "en_US": "USA",
+        "de_DE": "EUR",
+        "es_ES": "EUR",
+        "fr_FR": "EUR",
+        "it_IT": "EUR",
+        "hu_HU": "EUR",
+        "pt_PT": "EUR",
+        "ru_RU": "EUR",
+        "en_AU": "AUS",
+        "zh_CN": "CHN",
+        "ko_KR": "KOR",
+        "zh_TW": "TWN"
+    }
+    lang = environ.get('LANG', 'en_US.UTF-8')[:5]
+    if lang in availableLanguages:
+        return region[availableLanguages[lang]]
+    return region["AUTO"]

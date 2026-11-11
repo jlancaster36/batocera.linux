@@ -33,6 +33,9 @@ for_window [window_role="dialog"] floating enable
 
 # F1 launched apps
 for_window [app_id="azahar"] fullscreen enable
+for_window [app_id="azahar" title=".*Secondary Window.*"] move to workspace 2, fullscreen enable
+for_window [app_id="org.azahar_emu.Azahar"] fullscreen enable
+for_window [app_id="org.azahar_emu.Azahar" title=".*Secondary Window.*"] move to workspace 2, fullscreen enable
 for_window [app_id="flycast"] fullscreen enable
 for_window [app_id="duckstation-qt"] fullscreen enable
 for_window [app_id="dolphin-emu"] fullscreen enable

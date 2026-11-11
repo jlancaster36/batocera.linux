@@ -15,13 +15,14 @@ custom_features:
     prompt: SCREEN LAYOUT
     description: Arrange the dual screen layout. Separate windows can be changed with Hotkey+R2.
     choices:
+      Default: 0-false
       Top Only: 1-false
       Bottom Only: 1-true
       Large Top: 2-false
       Large Bottom: 2-true
       Left/Right: 3-false
       Right/Left: 3-true
-      Separate Windows: 4-false
+      Separate Windows (Dual Screen): 4-false
       Hybrid Screen Top: 5-false
       Hybrid Screen Bottom: 5-true
   azahar_large_screen_proportion:
