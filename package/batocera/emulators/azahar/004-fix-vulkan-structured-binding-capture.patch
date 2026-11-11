@@ -1,0 +1,38 @@
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 7a92bc1..f812cd3 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -886,10 +886,13 @@ void RasterizerVulkan::SyncAndUploadLUTs() {
+     }
+
+     std::size_t bytes_used = 0;
+-    auto [buffer, offset, invalidate] = texture_buffer.Map(max_size, sizeof(Common::Vec4f));
++    auto mapped = texture_buffer.Map(max_size, sizeof(Common::Vec4f));
++    auto* buffer = std::get<0>(mapped);
++    auto offset = std::get<1>(mapped);
++    auto invalidate = std::get<2>(mapped);
+
+     if (invalidate) {
+         pica.proctex.table_dirty = pica.proctex.TableAllDirty;
+     }
+
+     // helper function for SyncProcTexNoiseLUT/ColorMap/AlphaMap
+diff --git a/src/video_core/renderer_opengl/gl_rasterizer.cpp b/src/video_core/renderer_opengl/gl_rasterizer.cpp
+index 3b12345..6a78901 100644
+--- a/src/video_core/renderer_opengl/gl_rasterizer.cpp
++++ b/src/video_core/renderer_opengl/gl_rasterizer.cpp
+@@ -930,10 +930,13 @@ void RasterizerOpenGL::SyncAndUploadLUTs() {
+
+     std::size_t bytes_used = 0;
+     glBindBuffer(GL_TEXTURE_BUFFER, texture_buffer.GetHandle());
+-    const auto [buffer, offset, invalidate] = texture_buffer.Map(max_size, sizeof(Common::Vec4f));
++    const auto mapped = texture_buffer.Map(max_size, sizeof(Common::Vec4f));
++    auto* buffer = std::get<0>(mapped);
++    auto offset = std::get<1>(mapped);
++    auto invalidate = std::get<2>(mapped);
+
+     if (invalidate) {
+         pica.proctex.table_dirty = pica.proctex.TableAllDirty;
+     }
+
+     // helper function for SyncProcTexNoiseLUT/ColorMap/AlphaMap

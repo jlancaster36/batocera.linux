@@ -7,7 +7,7 @@ index d3e25be..e2077aa 100644
              QStringLiteral("Azahar %1 | %2 | %3").arg(full_name, game_title, tr("Primary Window")));
          secondary_window->setWindowTitle(QStringLiteral("Azahar %1 | %2 | %3")
 -                                             .arg(full_name, game_title, tr("Secondary Window")));
-+                                             .arg(full_name, game_title, "Secondary Window"));
++                                             .arg(full_name, game_title, QStringLiteral("Secondary Window")));
      }
  }
  

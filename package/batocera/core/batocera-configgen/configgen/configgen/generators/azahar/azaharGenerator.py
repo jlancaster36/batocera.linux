@@ -40,7 +40,7 @@ class AzaharGenerator(Generator):
     def generate(self, system, rom, playersControllers, metadata, guns, wheels, gameResolution):
         AzaharGenerator.writeAZAHARConfig(CONFIGS / "azahar-emu" / "qt-config.ini", system, playersControllers)
 
-        commandArray = ['/usr/bin/azahar', rom]
+        commandArray = ['/usr/bin/azahar', '-f', rom]
 
         return Command.Command(array=commandArray, env={
             "XDG_CONFIG_HOME": CONFIGS,
@@ -206,7 +206,7 @@ class AzaharGenerator(Generator):
         azaharConfig.set("Utility", r"use_disk_shader_cache\default", "false")
         # Custom Textures
         match system.config.get('azahar_custom_textures'):
-            case '0' | system.config.MISSING:
+            case '0' | None | system.config.MISSING:
                 azaharConfig.set("Utility", "custom_textures",  "false")
                 azaharConfig.set("Utility", r"custom_textures\default", "false")
                 azaharConfig.set("Utility", "preload_textures", "false")
@@ -241,19 +241,26 @@ class AzaharGenerator(Generator):
 
         if controller := Controller.find_player_number(playersControllers, 1):
             for x in azaharButtons:
-                azaharConfig.set("Controls", f"profiles\\1\\{x}", f'"{AzaharGenerator.setButton(azaharButtons[x], controller.guid, controller.inputs)}"')
-                azaharConfig.set("Controls", f"profiles\\1\\{x}\\default", "false")
+                btn_val = AzaharGenerator.setButton(azaharButtons[x], controller.guid, controller.inputs)
+                if btn_val:
+                    azaharConfig.set("Controls", f"profiles\\1\\{x}", f'"{btn_val}"')
+                    azaharConfig.set("Controls", f"profiles\\1\\{x}\\default", "false")
             for x in azaharAxis:
-                azaharConfig.set("Controls", f"profiles\\1\\{x}", f'"{AzaharGenerator.setAxis(azaharAxis[x], controller.guid, controller.inputs)}"')
-                azaharConfig.set("Controls", f"profiles\\1\\{x}\\default", "false")
+                axis_val = AzaharGenerator.setAxis(azaharAxis[x], controller.guid, controller.inputs)
+                if axis_val:
+                    azaharConfig.set("Controls", f"profiles\\1\\{x}", f'"{axis_val}"')
+                    azaharConfig.set("Controls", f"profiles\\1\\{x}\\default", "false")
 
         ## Update the configuration file
         with ensure_parents_and_open(azaharConfigFile, 'w') as configfile:
             azaharConfig.write(configfile)
 
     @staticmethod
+    def _escapeParam(s: str) -> str:
+        return s.replace("$", "$2").replace(":", "$0").replace(",", "$1")
+
+    @staticmethod
     def setButton(key: str, padGuid: str, padInputs: InputMapping) -> str | None:
-        # It would be better to pass the joystick num instead of the guid because 2 joysticks may have the same guid
         if key in padInputs:
             input = padInputs[key]
 
@@ -262,8 +269,9 @@ class AzaharGenerator(Generator):
             if input.type == "hat":
                 return f"engine:sdl,guid:{padGuid},hat:{input.id},direction:{AzaharGenerator.hatdirectionvalue(input.value)}"
             if input.type == "axis":
-                # Untested, need to configure an axis as button / triggers buttons to be tested too
-                return f"engine:sdl,guid:{padGuid},axis:{input.id},direction:+,threshold:0.5"
+                direction = "+" if int(input.value) >= 0 else "-"
+                threshold = "0.5" if direction == "+" else "-0.5"
+                return f"engine:sdl,guid:{padGuid},axis:{input.id},direction:{direction},threshold:{threshold}"
         return None
 
     @staticmethod
@@ -281,10 +289,24 @@ class AzaharGenerator(Generator):
         elif key == "joystick2" and "joystick2up" in padInputs:
             inputy = padInputs["joystick2up"]
 
-        if inputx is None or inputy is None:
-            return ""
+        if inputx is not None and inputy is not None:
+            return f"axis_x:{inputx.id},guid:{padGuid},axis_y:{inputy.id},engine:sdl"
 
-        return f"axis_x:{inputx.id},guid:{padGuid},axis_y:{inputy.id},engine:sdl"
+        # Fallback for arcade sticks / controllers without analog sticks:
+        # Map circle_pad using Azahar's analog_from_button engine from physical D-pad/axes
+        if key == "joystick1":
+            btn_up = AzaharGenerator.setButton("up", padGuid, padInputs)
+            btn_down = AzaharGenerator.setButton("down", padGuid, padInputs)
+            btn_left = AzaharGenerator.setButton("left", padGuid, padInputs)
+            btn_right = AzaharGenerator.setButton("right", padGuid, padInputs)
+            if btn_up and btn_down and btn_left and btn_right:
+                esc_up = AzaharGenerator._escapeParam(btn_up)
+                esc_down = AzaharGenerator._escapeParam(btn_down)
+                esc_left = AzaharGenerator._escapeParam(btn_left)
+                esc_right = AzaharGenerator._escapeParam(btn_right)
+                return f"engine:analog_from_button,up:{esc_up},down:{esc_down},left:{esc_left},right:{esc_right},modifier_scale:0.500000"
+
+        return ""
 
     @staticmethod
     def hatdirectionvalue(value: str) -> str:
@@ -316,7 +338,7 @@ def getAzaharLangFromEnvironment():
         "ko_KR": "KOR",
         "zh_TW": "TWN"
     }
-    lang = environ['LANG'][:5]
+    lang = environ.get('LANG', 'en_US.UTF-8')[:5]
     if lang in availableLanguages:
         return region[availableLanguages[lang]]
     return region["AUTO"]
